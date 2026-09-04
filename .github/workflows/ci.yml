@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v4
+      - name: Install RLE core (not on PyPI yet)
+        run: uv pip install "rimworld-learning-environment[mcp] @ git+https://github.com/AppSprout-dev/RLE" --system
+      - name: Install this harness
+        run: uv pip install -e ".[dev]" --system
+      - run: ruff check src/ tests/
+      - run: mypy src/
+      - run: pytest -q
+      - name: Visible to RLE (unavailable without the binary is expected)
+        run: python -c "from rle.harness import format_harness_table; print(format_harness_table())"
