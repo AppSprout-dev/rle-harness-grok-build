@@ -17,7 +17,8 @@ class GrokBuildPlugin:
     name = "grok-build"
     description = (
         "Grok Build coding agent (headless `grok -p`, session resumed each tick) acting "
-        "through the RLE MCP tools."
+        "through the RLE MCP tools. Optional warm=true keeps one grok-docker container "
+        "alive and docker exec's each tick."
     )
 
     def available(self) -> Availability:

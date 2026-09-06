@@ -61,6 +61,17 @@ jobs:
             echo "unexpected compatibility MCP in grok mcp list" >&2
             exit 1
           fi
+      - name: Smoke persist container (docker exec mcp list)
+        if: steps.probe.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          name="rle-grok-ci-persist-$$"
+          docker rm -f "$name" >/dev/null 2>&1 || true
+          docker run -d --name "$name" rle-grok-build:ci persist
+          out=$(docker exec "$name" /entrypoint.sh mcp list)
+          docker rm -f "$name"
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -qi rle
       - name: Note skipped image build
         if: steps.probe.outputs.ok != 'true'
         run: |

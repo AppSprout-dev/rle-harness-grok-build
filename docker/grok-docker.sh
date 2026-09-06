@@ -39,6 +39,25 @@ warn_skip_temp_mount() {
   echo "warning: skipping Docker bind-mount of hostile temp ${role} '${mount_path}'. Docker Desktop on Windows returns exit 125 Access is denied for %TEMP% / AppData\\Local\\Temp mounts. Relying on MCP_URL env and an empty container GROK_HOME (entrypoint writes config). Session resume across --rm ticks needs a non-Temp volume (set GROK_DOCKER_HOME_VOLUME)." >&2
 }
 
+PERSIST_ACTION="${RLE_GROK_PERSIST_ACTION:-}"
+PERSIST_CONTAINER="${RLE_GROK_PERSIST_CONTAINER:-}"
+
+if [[ -n "$PERSIST_ACTION" && "$PERSIST_ACTION" != "start" && "$PERSIST_ACTION" != "exec" && "$PERSIST_ACTION" != "stop" ]]; then
+  echo "unknown RLE_GROK_PERSIST_ACTION=${PERSIST_ACTION} (expected start|exec|stop)" >&2
+  exit 1
+fi
+
+# Stop does not need grok argv / python / ARGV_JSON.
+if [[ "$PERSIST_ACTION" == "stop" ]]; then
+  if [[ -z "$PERSIST_CONTAINER" ]]; then
+    echo "RLE_GROK_PERSIST_ACTION=stop requires RLE_GROK_PERSIST_CONTAINER" >&2
+    exit 1
+  fi
+  docker stop --time 10 "$PERSIST_CONTAINER" || true
+  docker rm -f "$PERSIST_CONTAINER" || true
+  exit 0
+fi
+
 # Windows cmd.exe %* drops quoted/large -p prompts. The harness writes argv
 # (after the wrapper path) as UTF-8 JSON and sets RLE_GROK_ARGV_JSON.
 grok_args=()
@@ -98,7 +117,6 @@ for a in "${grok_args[@]}"; do
 done
 
 docker_args=(
-  --rm
   --add-host=host.docker.internal:host-gateway
   -e "MCP_URL=${MCP_URL}"
   -e "GROK_HOME=/home/grok/.grok"
@@ -134,4 +152,29 @@ if [[ -n "$cwd_host" && -d "$cwd_host" ]]; then
   fi
 fi
 
-exec docker run "${docker_args[@]}" "$IMAGE" "${out[@]}"
+if [[ "$PERSIST_ACTION" == "exec" ]]; then
+  if [[ -z "$PERSIST_CONTAINER" ]]; then
+    echo "RLE_GROK_PERSIST_ACTION=exec requires RLE_GROK_PERSIST_CONTAINER" >&2
+    exit 1
+  fi
+  exec_args=(
+    -e "MCP_URL=${MCP_URL}"
+    -e "GROK_HOME=/home/grok/.grok"
+  )
+  if [[ -n "${XAI_API_KEY:-}" ]]; then
+    exec_args+=(-e "XAI_API_KEY=${XAI_API_KEY}")
+  fi
+  exec docker exec "${exec_args[@]}" "$PERSIST_CONTAINER" /entrypoint.sh "${out[@]}"
+fi
+
+if [[ "$PERSIST_ACTION" == "start" ]]; then
+  if [[ -z "$PERSIST_CONTAINER" ]]; then
+    echo "RLE_GROK_PERSIST_ACTION=start requires RLE_GROK_PERSIST_CONTAINER" >&2
+    exit 1
+  fi
+  docker rm -f "$PERSIST_CONTAINER" >/dev/null 2>&1 || true
+  # Detached, named, no --rm. Entrypoint `persist` sleeps after writing config.
+  exec docker run -d --name "$PERSIST_CONTAINER" "${docker_args[@]}" "$IMAGE" persist
+fi
+
+exec docker run --rm "${docker_args[@]}" "$IMAGE" "${out[@]}"

@@ -1,4 +1,11 @@
-"""Grok Build driven one headless invocation per tick.
+"""Grok Build driven one headless invocation per tick (optional warm container).
+
+Default (cold): one ``grok -p`` or ``docker run --rm`` per tick.
+
+Warm (``--harness-opt warm=true`` / ``persistent=true`` + grok-docker wrapper):
+one sidecar container started in ``start_agent``, ``docker exec`` each tick
+with ``--resume``, stopped in teardown. Grok has no OpenCode-style HTTP serve;
+documented long-lived modes are ACP (``grok agent serve`` / ``stdio``).
 
 Surface used (grok-build ``docs/user-guide/14-headless-mode.md`` and
 ``07-mcp-servers.md``):
@@ -37,7 +44,11 @@ from typing import Any, ClassVar
 from rle.harness import HarnessStepError
 from rle.harness.cli_base import HeadlessCliHarness, TurnResult
 
-from rle_harness_grok_build.argv_json import ARGV_JSON_ENV, prepare_docker_wrapper_invocation
+from rle_harness_grok_build.argv_json import (
+    ARGV_JSON_ENV,
+    is_docker_wrapper_binary,
+    prepare_docker_wrapper_invocation,
+)
 from rle_harness_grok_build.isolated_home import (
     AUTH_FILENAMES,
     check_mcp_list_output,
@@ -47,6 +58,12 @@ from rle_harness_grok_build.isolated_home import (
     write_project_grok_config,
 )
 from rle_harness_grok_build.options import GrokBuildOptions
+from rle_harness_grok_build.persist import (
+    PersistAction,
+    apply_persist_env,
+    new_container_name,
+    persist_start_args,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -168,30 +185,23 @@ class GrokBuildHarness(HeadlessCliHarness):
         self._session_id: str | None = None
         self._proc: asyncio.subprocess.Process | None = None
         self._mcp_url: str | None = None
+        self._persist_container: str | None = None
 
     async def _healthcheck_mcp(self) -> None:
         """Verify the isolated config exposes only the RLE MCP server."""
         assert self._binary is not None and self._workdir is not None
-        invoke, env, sidecar = self._prepare_exec([self._binary, "mcp", "list"])
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *invoke, cwd=self._workdir,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                env=env,
+            returncode, stdout, stderr = await asyncio.wait_for(
+                self._invoke([self._binary, "mcp", "list"]),
+                timeout=20,
             )
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=20)
-            except asyncio.TimeoutError as exc:
-                proc.kill()
-                await proc.wait()
-                raise HarnessStepError("grok MCP healthcheck timed out after 20s") from exc
-        finally:
-            if sidecar is not None:
-                sidecar.unlink(missing_ok=True)
-        output = (stdout_b + stderr_b).decode("utf-8", errors="replace")
-        if proc.returncode != 0:
+        except asyncio.TimeoutError as exc:
+            await self.abort_turn()
+            raise HarnessStepError("grok MCP healthcheck timed out after 20s") from exc
+        output = stdout + stderr
+        if returncode != 0:
             raise HarnessStepError(
-                f"grok MCP healthcheck failed ({proc.returncode}): {output.strip()[-800:]}",
+                f"grok MCP healthcheck failed ({returncode}): {output.strip()[-800:]}",
             )
         try:
             check_mcp_list_output(output)
@@ -220,7 +230,26 @@ class GrokBuildHarness(HeadlessCliHarness):
             "isolated GROK_HOME=%s with RLE-only MCP at %s",
             self._grok_home, cfg_url,
         )
-        await self._healthcheck_mcp()
+        if self.opts.warm_enabled and is_docker_wrapper_binary(binary):
+            self._persist_container = new_container_name()
+            logger.info(
+                "warm persist: starting container %s (docker exec per tick, not --rm)",
+                self._persist_container,
+            )
+        elif self.opts.warm_enabled:
+            logger.info(
+                "warm=true without a grok-docker wrapper: isolated GROK_HOME + "
+                "--resume only (no long-lived container). Grok has no OpenCode-style "
+                "HTTP serve; documented long-lived modes are ACP "
+                "(`grok agent serve` / `grok agent stdio`).",
+            )
+        try:
+            if self._persist_container is not None:
+                await self._start_persist_container()
+            await self._healthcheck_mcp()
+        except Exception:
+            await self._stop_persist_container()
+            raise
         if not os.environ.get(self.opts.api_key_env):
             logger.info(
                 "%s not set --- relying on Grok Build's cached login for headless auth",
@@ -240,21 +269,31 @@ class GrokBuildHarness(HeadlessCliHarness):
             env["MCP_URL"] = self._mcp_url
         return env
 
-    def _prepare_exec(self, cmd: list[str]) -> tuple[list[str], dict[str, str], Path | None]:
+    def _prepare_exec(
+        self,
+        cmd: list[str],
+        *,
+        persist_action: PersistAction | None = None,
+    ) -> tuple[list[str], dict[str, str], Path | None]:
         """Build subprocess argv/env; grok-docker wrappers get an argv JSON sidecar."""
         env = self._subprocess_env()
+        action = persist_action
+        if action is None and self._persist_container is not None:
+            action = "exec"
+        if action is not None and self._persist_container is not None:
+            apply_persist_env(env, container=self._persist_container, action=action)
         invoke, sidecar = prepare_docker_wrapper_invocation(cmd, env)
         return invoke, env, sidecar
 
-    async def send_turn(self, prompt: str) -> TurnResult:
-        assert self._binary is not None and self._workdir is not None
-        cmd = build_command(
-            self._binary, prompt, self.opts,
-            model=self.opts.model or self.ctx.config.model,
-            workdir=self._workdir, session_id=self._session_id,
-        )
-        logger.debug("grok invocation: %s", " ".join(cmd[:1] + ["-p", "<prompt>"] + cmd[3:]))
-        invoke, env, sidecar = self._prepare_exec(cmd)
+    async def _invoke(
+        self,
+        cmd: list[str],
+        *,
+        persist_action: PersistAction | None = None,
+    ) -> tuple[int, str, str]:
+        """Run *cmd* (or the docker wrapper + sidecar) and return rc/stdout/stderr."""
+        assert self._workdir is not None
+        invoke, env, sidecar = self._prepare_exec(cmd, persist_action=persist_action)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *invoke, cwd=self._workdir,
@@ -275,9 +314,44 @@ class GrokBuildHarness(HeadlessCliHarness):
         finally:
             if sidecar is not None:
                 sidecar.unlink(missing_ok=True)
-        returncode = proc.returncode or 0
-        stdout = stdout_b.decode("utf-8", errors="replace")
-        stderr = stderr_b.decode("utf-8", errors="replace")
+        return (
+            proc.returncode or 0,
+            stdout_b.decode("utf-8", errors="replace"),
+            stderr_b.decode("utf-8", errors="replace"),
+        )
+
+    async def _start_persist_container(self) -> None:
+        assert self._binary is not None and self._workdir is not None
+        returncode, stdout, stderr = await self._invoke(
+            persist_start_args(self._binary, self._workdir),
+            persist_action="start",
+        )
+        if returncode != 0:
+            raise HarnessStepError(
+                f"warm persist start failed ({returncode}): "
+                f"{(stderr or stdout).strip()[-800:]}",
+            )
+
+    async def _stop_persist_container(self) -> None:
+        if self._persist_container is None or self._binary is None:
+            self._persist_container = None
+            return
+        try:
+            if self._workdir is not None:
+                await self._invoke([self._binary], persist_action="stop")
+        except Exception:
+            logger.debug("warm persist stop failed", exc_info=True)
+        self._persist_container = None
+
+    async def send_turn(self, prompt: str) -> TurnResult:
+        assert self._binary is not None and self._workdir is not None
+        cmd = build_command(
+            self._binary, prompt, self.opts,
+            model=self.opts.model or self.ctx.config.model,
+            workdir=self._workdir, session_id=self._session_id,
+        )
+        logger.debug("grok invocation: %s", " ".join(cmd[:1] + ["-p", "<prompt>"] + cmd[3:]))
+        returncode, stdout, stderr = await self._invoke(cmd)
         if stderr.strip():
             logger.debug("grok stderr (tail): %s", stderr.strip()[-1500:])
         if returncode != 0:
@@ -312,6 +386,7 @@ class GrokBuildHarness(HeadlessCliHarness):
 
     async def stop_agent(self) -> None:
         await self.abort_turn()
+        await self._stop_persist_container()
         if self._workdir is not None:
             shutil.rmtree(self._workdir, ignore_errors=True)
             self._workdir = None

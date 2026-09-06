@@ -46,4 +46,11 @@ if [[ $# -eq 0 ]]; then
   set -- mcp list
 fi
 
+# Warm persist: write isolated config once, then keep the container alive so
+# the host can `docker exec /entrypoint.sh grok -p … --resume` each tick.
+# `docker exec` skips the image ENTRYPOINT, so wrappers call this path.
+if [[ "${1:-}" == "persist" ]]; then
+  exec sleep infinity
+fi
+
 exec grok "$@"

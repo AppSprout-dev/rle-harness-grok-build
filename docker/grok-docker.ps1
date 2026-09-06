@@ -41,6 +41,15 @@ if (-not [string]::IsNullOrWhiteSpace($env:RLE_GROK_ARGV_JSON)) {
     }
 }
 
+$PersistAction = $env:RLE_GROK_PERSIST_ACTION
+$PersistContainer = $env:RLE_GROK_PERSIST_CONTAINER
+if (-not [string]::IsNullOrWhiteSpace($PersistAction)) {
+    if (@("start", "exec", "stop") -notcontains $PersistAction) {
+        Write-Error "unknown RLE_GROK_PERSIST_ACTION=$PersistAction (expected start|exec|stop)"
+        exit 1
+    }
+}
+
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Write-Error "docker CLI not found. Install Docker Desktop and retry."
     exit 127
@@ -49,6 +58,17 @@ docker info *>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Docker CLI is present but the daemon is not running. Start Docker Desktop."
     exit 1
+}
+
+if ($PersistAction -eq "stop") {
+    if ([string]::IsNullOrWhiteSpace($PersistContainer)) {
+        Write-Error "RLE_GROK_PERSIST_ACTION=stop requires RLE_GROK_PERSIST_CONTAINER"
+        exit 1
+    }
+    $ErrorActionPreference = "Continue"
+    docker stop --time 10 $PersistContainer
+    docker rm -f $PersistContainer
+    exit 0
 }
 
 $cwdHost = $null
@@ -104,7 +124,6 @@ function Write-SkipTempMount {
 }
 
 $dockerArgs = @(
-    "run", "--rm",
     "--add-host=host.docker.internal:host-gateway",
     "-e", "MCP_URL=$McpUrl",
     "-e", "GROK_HOME=/home/grok/.grok"
@@ -148,16 +167,15 @@ if ($cwdHost -and (Test-Path -LiteralPath $cwdHost -PathType Container)) {
     }
 }
 
-$dockerArgs += @($Image) + $out
-
-# Optional host-side argv trace. One element per line (never a joined command
-# line). Do not feed this log back into Start-Process / cmd — that re-splits
-# Unicode (em dash in "RLE turn — tick 0...") into extra arguments.
-if ($env:RLE_GROK_DOCKER_TRACE) {
+function Write-GrokDockerTrace {
+    param([string[]]$Args)
+    if (-not $env:RLE_GROK_DOCKER_TRACE) {
+        return
+    }
     $redacted = New-Object System.Collections.Generic.List[string]
-    for ($i = 0; $i -lt $dockerArgs.Count; $i++) {
-        $a = $dockerArgs[$i]
-        if ($i -gt 0 -and $dockerArgs[$i - 1] -eq "-p") {
+    for ($i = 0; $i -lt $Args.Count; $i++) {
+        $a = $Args[$i]
+        if ($i -gt 0 -and $Args[$i - 1] -eq "-p") {
             [void]$redacted.Add("<prompt $($a.Length) chars>")
         }
         elseif ($a -like "XAI_API_KEY=*") {
@@ -185,5 +203,40 @@ if ($env:RLE_GROK_DOCKER_TRACE) {
 # Start-Process re-joins the array into one Windows command line; the CRT
 # re-splits it. Live prove: Unicode em dash in "RLE turn — tick 0..." became
 # a new argument (`error: unexpected argument '—' found`).
-& docker @dockerArgs
+if ($PersistAction -eq "exec") {
+    if ([string]::IsNullOrWhiteSpace($PersistContainer)) {
+        Write-Error "RLE_GROK_PERSIST_ACTION=exec requires RLE_GROK_PERSIST_CONTAINER"
+        exit 1
+    }
+    $execArgs = @(
+        "exec",
+        "-e", "MCP_URL=$McpUrl",
+        "-e", "GROK_HOME=/home/grok/.grok"
+    )
+    if ($env:XAI_API_KEY) {
+        $execArgs += @("-e", "XAI_API_KEY=$($env:XAI_API_KEY)")
+    }
+    $execArgs += @($PersistContainer, "/entrypoint.sh") + @($out)
+    Write-GrokDockerTrace -Args $execArgs
+    & docker @execArgs
+    exit $LASTEXITCODE
+}
+
+if ($PersistAction -eq "start") {
+    if ([string]::IsNullOrWhiteSpace($PersistContainer)) {
+        Write-Error "RLE_GROK_PERSIST_ACTION=start requires RLE_GROK_PERSIST_CONTAINER"
+        exit 1
+    }
+    $ErrorActionPreference = "Continue"
+    docker rm -f $PersistContainer *>$null
+    $ErrorActionPreference = "Stop"
+    $startArgs = @("run", "-d", "--name", $PersistContainer) + $dockerArgs + @($Image, "persist")
+    Write-GrokDockerTrace -Args $startArgs
+    & docker @startArgs
+    exit $LASTEXITCODE
+}
+
+$runArgs = @("run", "--rm") + $dockerArgs + @($Image) + @($out)
+Write-GrokDockerTrace -Args $runArgs
+& docker @runArgs
 exit $LASTEXITCODE

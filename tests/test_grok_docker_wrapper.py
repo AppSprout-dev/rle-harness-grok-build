@@ -8,6 +8,11 @@ import subprocess
 from pathlib import Path
 
 from rle_harness_grok_build.argv_json import ARGV_JSON_ENV, write_argv_json
+from rle_harness_grok_build.persist import (
+    PERSIST_ACTION_ENV,
+    PERSIST_CONTAINER_ENV,
+    PERSIST_KEEPALIVE_ARG,
+)
 
 WRAPPER = Path(__file__).resolve().parents[1] / "docker" / "grok-docker.sh"
 PS1_WRAPPER = Path(__file__).resolve().parents[1] / "docker" / "grok-docker.ps1"
@@ -43,6 +48,8 @@ def _run_wrapper(
         "GROK_DOCKER_IMAGE",
         "MCP_URL",
         ARGV_JSON_ENV,
+        PERSIST_ACTION_ENV,
+        PERSIST_CONTAINER_ENV,
     ):
         env.pop(key, None)
     env.update(extra_env)
@@ -194,7 +201,11 @@ class TestGrokDockerShArgvJson:
 class TestGrokDockerPs1Invoke:
     def test_uses_splat_not_start_process(self) -> None:
         text = PS1_WRAPPER.read_text(encoding="utf-8")
-        assert "& docker @dockerArgs" in text
+        assert "& docker @runArgs" in text
+        assert "& docker @execArgs" in text
+        assert "& docker @startArgs" in text
+        assert "RLE_GROK_PERSIST_ACTION" in text
+        assert "/entrypoint.sh" in text
         assert "RLE_GROK_DOCKER_TRACE" in text
         invoke_lines = [
             line.strip()
@@ -202,3 +213,105 @@ class TestGrokDockerPs1Invoke:
             if not line.lstrip().startswith("#") and "Start-Process" in line
         ]
         assert invoke_lines == []
+
+
+class TestGrokDockerShPersist:
+    def test_start_is_detached_named_no_rm(self, tmp_path: Path) -> None:
+        home = tmp_path / "safe-grok-home"
+        cwd = tmp_path / "safe-work"
+        home.mkdir()
+        cwd.mkdir()
+        proc = _run_wrapper(
+            tmp_path,
+            ["--cwd", str(cwd), PERSIST_KEEPALIVE_ARG],
+            {
+                "GROK_HOME": str(home),
+                PERSIST_ACTION_ENV: "start",
+                PERSIST_CONTAINER_ENV: "rle-grok-test1",
+            },
+        )
+        assert proc.returncode == 0, proc.stderr
+        lines = proc.stdout.splitlines()
+        assert "run" in lines
+        assert "-d" in lines
+        assert "--name" in lines
+        assert "rle-grok-test1" in lines
+        assert "--rm" not in lines
+        assert PERSIST_KEEPALIVE_ARG in lines
+        mounts = _volume_targets(proc.stdout)
+        assert f"{home}:/home/grok/.grok" in mounts
+        assert f"{cwd}:/work" in mounts
+
+    def test_exec_uses_entrypoint_and_rewrites_cwd(self, tmp_path: Path) -> None:
+        cwd = tmp_path / "safe-work"
+        cwd.mkdir()
+        sidecar = write_argv_json(
+            ["-p", 'RLE turn — tick 0', "--cwd", str(cwd), "--yolo"],
+            tmp_path / "tick.json",
+        )
+        proc = _run_wrapper(
+            tmp_path,
+            [],
+            {
+                ARGV_JSON_ENV: str(sidecar),
+                PERSIST_ACTION_ENV: "exec",
+                PERSIST_CONTAINER_ENV: "rle-grok-test1",
+            },
+        )
+        assert proc.returncode == 0, proc.stderr
+        lines = proc.stdout.splitlines()
+        assert lines[0] == "exec"
+        assert "/entrypoint.sh" in lines
+        assert "rle-grok-test1" in lines
+        assert "-p" in lines
+        assert "RLE turn — tick 0" in lines
+        assert "--cwd" in lines
+        assert "/work" in lines
+        assert str(cwd) not in lines
+        assert "--rm" not in lines
+        assert "run" not in lines
+
+    def test_stop_rm_container(self, tmp_path: Path) -> None:
+        proc = _run_wrapper(
+            tmp_path,
+            ["ignored"],
+            {
+                PERSIST_ACTION_ENV: "stop",
+                PERSIST_CONTAINER_ENV: "rle-grok-test1",
+            },
+        )
+        assert proc.returncode == 0, proc.stderr
+        text = proc.stdout
+        assert "stop" in text.split()
+        assert "rle-grok-test1" in text
+        assert "rm" in text.split()
+
+    def test_named_volume_on_start(self, tmp_path: Path) -> None:
+        proc = _run_wrapper(
+            tmp_path,
+            [PERSIST_KEEPALIVE_ARG],
+            {
+                "GROK_DOCKER_HOME_VOLUME": "rle-grok-home",
+                PERSIST_ACTION_ENV: "start",
+                PERSIST_CONTAINER_ENV: "rle-grok-vol",
+            },
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "rle-grok-home:/home/grok/.grok" in _volume_targets(proc.stdout)
+        assert "--rm" not in proc.stdout.split()
+
+    def test_unknown_action_fails(self, tmp_path: Path) -> None:
+        proc = _run_wrapper(
+            tmp_path,
+            ["mcp", "list"],
+            {PERSIST_ACTION_ENV: "pause", PERSIST_CONTAINER_ENV: "x"},
+        )
+        assert proc.returncode != 0
+        assert "unknown RLE_GROK_PERSIST_ACTION" in proc.stderr
+
+    def test_entrypoint_persist_keepalive(self) -> None:
+        text = (Path(__file__).resolve().parents[1] / "docker" / "entrypoint.sh").read_text(
+            encoding="utf-8",
+        )
+        assert '[[ "${1:-}" == "persist" ]]' in text
+        assert "sleep infinity" in text

@@ -8,6 +8,10 @@ Grok Build coding agent be the harness: each tick is one headless invocation
 through the RLE MCP tools (`rle__get_brief`, `rle__work_priority`, … `rle__end_turn`), and
 the writes that reached the game are scored with the same composite as every other harness.
 
+**OpenCode-parity lifecycle experiment:** default stays cold-start (`docker run --rm` or
+host `grok -p` every tick). `--harness-opt warm=true` (alias `persistent=true`) keeps one
+Docker sidecar alive across ticks — see [Warm persist](#warm-persist-opencode-parity-spike).
+
 ## Install
 
 ```bash
@@ -38,14 +42,16 @@ Options (`--harness-opt key=value`):
 | Option | Default | Meaning |
 |---|---|---|
 | `binary` | `grok` | Executable name/path |
+| `warm` / `persistent` | false | Start one grok-docker container in setup; `docker exec` each tick |
 | `resume_session` | true | `--resume <sessionId>` every tick so context carries over |
-| `max_turns` | – | `--max-turns` cap on agentic rounds per tick |
+| `max_turns` | 20 | `--max-turns` cap on agentic rounds per tick |
 | `reasoning_effort` | – | `--reasoning-effort` |
 | `disallowed_tools` | shell/edit/web tools | Built-ins removed so the agent can only act via RLE tools |
 | `turn_timeout_s` | 180 | Kill the invocation after this many seconds |
 | `extra_instructions` | – | Appended to every turn prompt |
 | `extra_args` | – | Raw flags appended to every invocation |
 | `mcp_advertise_url` | – | URL written into grok config (Docker: `http://host.docker.internal:8766/mcp`) |
+| `mcp_container_reachable` | RLE config | Bind MCP on `0.0.0.0:8766` and advertise `host.docker.internal` |
 
 ## Docker (stock Linux grok only)
 
@@ -139,13 +145,74 @@ python scripts/run_scenario.py crashlanded --harness grok-build --ticks 1 `
 
 Details, auth mounts, and the do-not-mount list: [docker/README.md](docker/README.md).
 
+## Warm persist (OpenCode-parity spike)
+
+Jason + CoS diagnosed the OpenCode (~0.82) vs Grok Build (~0.72/0.53) gap as **harness
+lifecycle**, not xAI API speed: OpenCode spawns `opencode serve` once and POSTs each
+tick; this harness used to `docker run --rm` / `grok -p` **every** tick (cold boot +
+MCP + tool surface).
+
+Grok Build has no OpenCode-style HTTP serve. Documented long-lived modes are ACP:
+
+```bash
+grok agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
+grok agent --always-approve --model grok-4.6 stdio
+```
+
+This spike does **not** implement an ACP client. `warm=true` keeps one stock-Linux-grok
+container up and `docker exec`s documented `grok -p --resume` (RLE-only MCP, isolated
+`GROK_HOME`). Cold-start remains the default.
+
+### Crashlanded rematch (seed 42 / scoring 1.2 / 300s turns)
+
+From an RLE checkout with RimWorld + RIMAPI on the host and the McpHost bind PR:
+
+```powershell
+$env:XAI_API_KEY = "xai-..."
+python scripts/run_scenario.py crashlanded --harness grok-build --model grok-4.6 `
+  --seed 42 --scoring 1.2 --ticks 10 --tick-interval 30 `
+  --harness-opt "binary=.\docker\grok-docker.cmd" `
+  --harness-opt warm=true `
+  --harness-opt turn_timeout_s=300 `
+  --harness-opt mcp_container_reachable=true `
+  --harness-opt mcp_advertise_url=http://host.docker.internal:8766/mcp
+```
+
+Unix (same knobs; `persistent=true` is an alias for `warm`):
+
+```bash
+python scripts/run_scenario.py crashlanded --harness grok-build --model grok-4.6 \
+  --seed 42 --scoring 1.2 --ticks 10 --tick-interval 30 \
+  --harness-opt binary=./docker/grok-docker.sh \
+  --harness-opt persistent=true \
+  --harness-opt turn_timeout_s=300 \
+  --harness-opt mcp_container_reachable=true \
+  --harness-opt mcp_advertise_url=http://host.docker.internal:8766/mcp
+```
+
+Windows `.cmd` still uses `RLE_GROK_ARGV_JSON`. Optional `GROK_DOCKER_HOME_VOLUME`
+still mounts a named volume on persist **start** (container disk also keeps
+`/home/grok/.grok` because the sidecar is not `--rm`).
+
+### How to measure TTFA
+
+Compare the same seed/scoring/timeout with and without `warm=true`:
+
+1. **Tick latency** — `deliberation_log[].latency_ms` / `extras.latency_ms` (prompt → agent return).
+2. **Time to first RLE action (TTFA)** — wall clock from turn start to the first `rle__*`
+   ledger/tool event (not model TTFT). Cold docker median was ~123s to first action;
+   bare `grok -p` ~5–10s; direct xAI tiny call ~0.7s.
+3. Tick 0 vs later ticks: persist should drop per-tick `docker run` boot; if TTFA stays
+   huge, remaining cost is `grok -p` MCP/tool init (next experiment: ACP `agent serve`).
+
 ## How it works
 
 - A temp working directory with `.grok/config.toml` declaring the RLE MCP server
   (hosted in-process by RLE over streamable HTTP) as `[mcp_servers.rle] url = …`.
-- Per tick: `grok -p <prompt> --output-format json --yolo --cwd <workdir> --no-subagents
-  --no-plan [-m model] [--resume sid] …`; `sessionId`, `usage` and `total_cost_usd` from the
-  JSON object feed RLE's tracking.
+- Cold (default): `grok -p <prompt> --output-format json --yolo --cwd <workdir> --no-subagents
+  --no-plan [-m model] [--resume sid] …` (or `docker run --rm` via the wrapper).
+- Warm: `docker run -d --name rle-grok-…` once, then `docker exec … /entrypoint.sh grok -p …`
+  each tick; `sessionId`, `usage` and `total_cost_usd` from the JSON object feed RLE's tracking.
 - `--smoke-test` needs no Grok Build: a scripted agent plays the same MCP round trip.
 
 ## Development
