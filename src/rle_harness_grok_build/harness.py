@@ -1,11 +1,16 @@
-"""Grok Build driven one headless invocation per tick (optional warm container).
+"""Grok Build driven one headless invocation per tick (optional warm / ACP).
 
 Default (cold): one ``grok -p`` or ``docker run --rm`` per tick.
 
 Warm (``--harness-opt warm=true`` / ``persistent=true`` + grok-docker wrapper):
 one sidecar container started in ``start_agent``, ``docker exec`` each tick
-with ``--resume``, stopped in teardown. Grok has no OpenCode-style HTTP serve;
-documented long-lived modes are ACP (``grok agent serve`` / ``stdio``).
+with ``--resume``, stopped in teardown.
+
+ACP (``--harness-opt acp=true`` / ``mode=acp``): long-lived
+``grok agent --always-approve serve --bind … --secret …``. Each tick is an
+ACP ``session/prompt`` over the documented WebSocket (``ws://bind/ws``).
+Docker prefers serve inside the warm persist container (entrypoint
+``acp-serve``). Default stays today's ``-p`` / warm path.
 
 Surface used (grok-build ``docs/user-guide/14-headless-mode.md`` and
 ``07-mcp-servers.md``):
@@ -35,6 +40,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -44,6 +50,18 @@ from typing import Any, ClassVar
 from rle.harness import HarnessStepError
 from rle.harness.cli_base import HeadlessCliHarness, TurnResult
 
+from rle_harness_grok_build.acp import (
+    ACP_CONTAINER_PORT,
+    CONTAINER_WORKDIR,
+    DEFAULT_READY_TIMEOUT_S,
+    AcpClient,
+    AcpError,
+    acp_ws_url,
+    agent_option_flags,
+    build_agent_serve_command,
+    client_ws_host,
+    resolve_acp_listen,
+)
 from rle_harness_grok_build.argv_json import (
     ARGV_JSON_ENV,
     is_docker_wrapper_binary,
@@ -60,6 +78,7 @@ from rle_harness_grok_build.isolated_home import (
 from rle_harness_grok_build.options import GrokBuildOptions
 from rle_harness_grok_build.persist import (
     PersistAction,
+    apply_acp_env,
     apply_persist_env,
     new_container_name,
     persist_start_args,
@@ -186,6 +205,12 @@ class GrokBuildHarness(HeadlessCliHarness):
         self._proc: asyncio.subprocess.Process | None = None
         self._mcp_url: str | None = None
         self._persist_container: str | None = None
+        self._acp: AcpClient | None = None
+        self._serve_proc: asyncio.subprocess.Process | None = None
+        self._serve_log_tasks: list[asyncio.Task[None]] = []
+        self._acp_publish: str | None = None
+        self._acp_secret: str | None = None
+        self._acp_session_cwd: str | None = None
 
     async def _healthcheck_mcp(self) -> None:
         """Verify the isolated config exposes only the RLE MCP server."""
@@ -230,7 +255,15 @@ class GrokBuildHarness(HeadlessCliHarness):
             "isolated GROK_HOME=%s with RLE-only MCP at %s",
             self._grok_home, cfg_url,
         )
-        if self.opts.warm_enabled and is_docker_wrapper_binary(binary):
+        if self.opts.acp_enabled and is_docker_wrapper_binary(binary):
+            self._persist_container = new_container_name()
+            logger.info(
+                "ACP serve: persist container %s runs grok agent serve (not grok -p)",
+                self._persist_container,
+            )
+        elif self.opts.acp_enabled:
+            logger.info("ACP serve: host grok agent --always-approve serve")
+        elif self.opts.warm_enabled and is_docker_wrapper_binary(binary):
             self._persist_container = new_container_name()
             logger.info(
                 "warm persist: starting container %s (docker exec per tick, not --rm)",
@@ -239,15 +272,19 @@ class GrokBuildHarness(HeadlessCliHarness):
         elif self.opts.warm_enabled:
             logger.info(
                 "warm=true without a grok-docker wrapper: isolated GROK_HOME + "
-                "--resume only (no long-lived container). Grok has no OpenCode-style "
-                "HTTP serve; documented long-lived modes are ACP "
-                "(`grok agent serve` / `grok agent stdio`).",
+                "--resume only (no long-lived container). Use acp=true for "
+                "documented grok agent serve.",
             )
         try:
-            if self._persist_container is not None:
+            if self.opts.acp_enabled:
+                await self._start_acp_agent()
+            elif self._persist_container is not None:
                 await self._start_persist_container()
-            await self._healthcheck_mcp()
+                await self._healthcheck_mcp()
+            else:
+                await self._healthcheck_mcp()
         except Exception:
+            await self._stop_acp()
             await self._stop_persist_container()
             raise
         if not os.environ.get(self.opts.api_key_env):
@@ -282,6 +319,12 @@ class GrokBuildHarness(HeadlessCliHarness):
             action = "exec"
         if action is not None and self._persist_container is not None:
             apply_persist_env(env, container=self._persist_container, action=action)
+        if (
+            action == "start"
+            and self._acp_publish is not None
+            and self._acp_secret is not None
+        ):
+            apply_acp_env(env, publish=self._acp_publish, secret=self._acp_secret)
         invoke, sidecar = prepare_docker_wrapper_invocation(cmd, env)
         return invoke, env, sidecar
 
@@ -320,10 +363,19 @@ class GrokBuildHarness(HeadlessCliHarness):
             stderr_b.decode("utf-8", errors="replace"),
         )
 
+    def _agent_model(self) -> str | None:
+        return self.opts.model or self.ctx.config.model
+
     async def _start_persist_container(self) -> None:
         assert self._binary is not None and self._workdir is not None
+        flags = None
+        if self.opts.acp_enabled:
+            flags = agent_option_flags(self.opts, model=self._agent_model())
         returncode, stdout, stderr = await self._invoke(
-            persist_start_args(self._binary, self._workdir),
+            persist_start_args(
+                self._binary, self._workdir,
+                acp=self.opts.acp_enabled, agent_flags=flags,
+            ),
             persist_action="start",
         )
         if returncode != 0:
@@ -331,6 +383,104 @@ class GrokBuildHarness(HeadlessCliHarness):
                 f"warm persist start failed ({returncode}): "
                 f"{(stderr or stdout).strip()[-800:]}",
             )
+
+    async def _start_acp_agent(self) -> None:
+        """Spawn documented grok agent serve and open one ACP session."""
+        assert self._binary is not None and self._workdir is not None
+        host, port = resolve_acp_listen(self.opts.acp_bind)
+        secret = self.opts.acp_secret or secrets.token_urlsafe(32)
+        self._acp_secret = secret
+        model = self._agent_model()
+        if self._persist_container is not None:
+            self._acp_publish = f"{host}:{port}:{ACP_CONTAINER_PORT}"
+            self._acp_session_cwd = CONTAINER_WORKDIR
+            await self._start_persist_container()
+            await self._healthcheck_mcp()
+            connect_host, connect_port = client_ws_host(host), port
+        else:
+            await self._healthcheck_mcp()
+            bind = f"{host}:{port}"
+            cmd = build_agent_serve_command(
+                self._binary, bind=bind, secret=secret,
+                cwd=self._workdir, model=model, opts=self.opts,
+            )
+            await self._spawn_host_serve(cmd)
+            self._acp_session_cwd = self._workdir
+            connect_host, connect_port = client_ws_host(host), port
+        client = AcpClient(acp_ws_url(connect_host, connect_port, secret=secret), secret)
+        try:
+            await client.connect(timeout_s=DEFAULT_READY_TIMEOUT_S)
+            await client.initialize()
+            sid = await client.new_session(self._acp_session_cwd)
+        except AcpError as exc:
+            await client.close()
+            raise HarnessStepError(str(exc)) from exc
+        self._acp = client
+        self._session_id = sid
+        logger.info("ACP session %s ready (cwd=%s)", sid, self._acp_session_cwd)
+
+    async def _spawn_host_serve(self, cmd: list[str]) -> None:
+        assert self._workdir is not None
+        invoke, env, sidecar = self._prepare_exec(cmd)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *invoke, cwd=self._workdir,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+        finally:
+            if sidecar is not None:
+                sidecar.unlink(missing_ok=True)
+        self._serve_proc = proc
+        if proc.stdout is not None:
+            self._serve_log_tasks.append(
+                asyncio.create_task(self._drain_stream(proc.stdout, "stdout")),
+            )
+        if proc.stderr is not None:
+            self._serve_log_tasks.append(
+                asyncio.create_task(self._drain_stream(proc.stderr, "stderr")),
+            )
+        await asyncio.sleep(0.05)
+        if proc.returncode is not None:
+            raise HarnessStepError(
+                f"grok agent serve exited {proc.returncode} during startup",
+            )
+
+    async def _drain_stream(
+        self, stream: asyncio.StreamReader, label: str,
+    ) -> None:
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    return
+                logger.debug(
+                    "grok agent serve %s: %s",
+                    label, line.decode("utf-8", errors="replace").rstrip(),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("grok agent serve %s drain failed", label, exc_info=True)
+
+    async def _stop_acp(self) -> None:
+        client = self._acp
+        self._acp = None
+        if client is not None:
+            try:
+                await client.close()
+            except Exception:
+                logger.debug("ACP client close failed", exc_info=True)
+        proc = self._serve_proc
+        self._serve_proc = None
+        if proc is not None:
+            await self._terminate_process(proc)
+        for task in self._serve_log_tasks:
+            task.cancel()
+        self._serve_log_tasks = []
+        self._acp_publish = None
+        self._acp_secret = None
+        self._acp_session_cwd = None
 
     async def _stop_persist_container(self) -> None:
         if self._persist_container is None or self._binary is None:
@@ -344,6 +494,21 @@ class GrokBuildHarness(HeadlessCliHarness):
         self._persist_container = None
 
     async def send_turn(self, prompt: str) -> TurnResult:
+        if self._acp is not None:
+            if not self.opts.resume_session and self._acp_session_cwd:
+                try:
+                    sid = await self._acp.new_session(self._acp_session_cwd)
+                except AcpError as exc:
+                    raise HarnessStepError(str(exc)) from exc
+                self._session_id = sid
+            try:
+                turn = await self._acp.prompt(prompt)
+            except AcpError as exc:
+                raise HarnessStepError(str(exc)) from exc
+            extra_sid = turn.extras.get("session_id")
+            if extra_sid:
+                self._session_id = str(extra_sid)
+            return turn
         assert self._binary is not None and self._workdir is not None
         cmd = build_command(
             self._binary, prompt, self.opts,
@@ -359,9 +524,9 @@ class GrokBuildHarness(HeadlessCliHarness):
                 f"grok exited {returncode}: {(stderr or stdout).strip()[-800:]}",
             )
         turn = parse_json_output(stdout)
-        sid = turn.extras.get("session_id")
-        if sid:
-            self._session_id = str(sid)
+        extra_sid = turn.extras.get("session_id")
+        if extra_sid:
+            self._session_id = str(extra_sid)
         return turn
 
     async def _terminate_process(self, proc: asyncio.subprocess.Process) -> None:
@@ -378,6 +543,12 @@ class GrokBuildHarness(HeadlessCliHarness):
             pass
 
     async def abort_turn(self) -> None:
+        if self._acp is not None:
+            try:
+                await self._acp.cancel()
+            except Exception:
+                logger.debug("ACP session/cancel failed", exc_info=True)
+            return
         proc = self._proc
         if proc is not None:
             await self._terminate_process(proc)
@@ -386,6 +557,7 @@ class GrokBuildHarness(HeadlessCliHarness):
 
     async def stop_agent(self) -> None:
         await self.abort_turn()
+        await self._stop_acp()
         await self._stop_persist_container()
         if self._workdir is not None:
             shutil.rmtree(self._workdir, ignore_errors=True)

@@ -181,6 +181,9 @@ function Write-GrokDockerTrace {
         elseif ($a -like "XAI_API_KEY=*") {
             [void]$redacted.Add("XAI_API_KEY=<redacted>")
         }
+        elseif ($a -like "GROK_AGENT_SECRET=*") {
+            [void]$redacted.Add("GROK_AGENT_SECRET=<redacted>")
+        }
         else {
             [void]$redacted.Add($a)
         }
@@ -230,7 +233,21 @@ if ($PersistAction -eq "start") {
     $ErrorActionPreference = "Continue"
     docker rm -f $PersistContainer *>$null
     $ErrorActionPreference = "Stop"
-    $startArgs = @("run", "-d", "--name", $PersistContainer) + $dockerArgs + @($Image, "persist")
+    $imageCmd = @("persist")
+    if (-not [string]::IsNullOrWhiteSpace($env:RLE_GROK_ACP_PUBLISH)) {
+        $dockerArgs += @("-p", $env:RLE_GROK_ACP_PUBLISH)
+        if ($env:GROK_AGENT_SECRET) {
+            $dockerArgs += @("-e", "GROK_AGENT_SECRET=$($env:GROK_AGENT_SECRET)")
+        }
+        $agentFlags = New-Object System.Collections.Generic.List[string]
+        foreach ($a in $out) {
+            if ($a -ne "persist" -and $a -ne "acp-serve") {
+                [void]$agentFlags.Add($a)
+            }
+        }
+        $imageCmd = @("acp-serve") + @($agentFlags)
+    }
+    $startArgs = @("run", "-d", "--name", $PersistContainer) + $dockerArgs + @($Image) + $imageCmd
     Write-GrokDockerTrace -Args $startArgs
     & docker @startArgs
     exit $LASTEXITCODE

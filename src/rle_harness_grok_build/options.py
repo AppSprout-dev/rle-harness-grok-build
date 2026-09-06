@@ -60,7 +60,41 @@ class GrokBuildOptions(HeadlessCliOptions):
         default=False,
         description="Alias for warm. Either --harness-opt enables the persist path.",
     )
+    acp: bool = Field(
+        default=False,
+        description=(
+            "Long-lived grok agent serve over ACP (JSON-RPC WebSocket). "
+            "Default false keeps today's grok -p / warm docker-exec path. "
+            "Also enabled by --harness-opt mode=acp."
+        ),
+    )
+    mode: str | None = Field(
+        default=None,
+        description="Optional path selector. mode=acp is an alias for acp=true.",
+    )
+    acp_bind: str | None = Field(
+        default=None,
+        description=(
+            "Host listen address for grok agent serve, host:port. "
+            "Default 127.0.0.1 plus an ephemeral port. Inside Docker the agent "
+            "binds 0.0.0.0:2419 and this host:port is published."
+        ),
+    )
+    acp_secret: str | None = Field(
+        default=None,
+        description=(
+            "Shared secret for grok agent serve (Authorization Bearer / "
+            "?server-key=). Generated per run when omitted."
+        ),
+    )
 
     @property
     def warm_enabled(self) -> bool:
         return self.warm or self.persistent
+
+    @property
+    def acp_enabled(self) -> bool:
+        if self.acp:
+            return True
+        mode = (self.mode or "").strip().lower()
+        return mode == "acp"

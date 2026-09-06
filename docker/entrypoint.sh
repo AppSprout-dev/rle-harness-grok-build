@@ -53,4 +53,17 @@ if [[ "${1:-}" == "persist" ]]; then
   exec sleep infinity
 fi
 
+# ACP serve: same isolated home, then documented grok agent serve.
+# Host publishes the port (RLE_GROK_ACP_PUBLISH) and talks JSON-RPC over /ws.
+if [[ "${1:-}" == "acp-serve" ]]; then
+  shift
+  bind="${GROK_ACP_BIND:-0.0.0.0:2419}"
+  if [[ -z "${GROK_AGENT_SECRET:-}" ]]; then
+    echo "acp-serve requires GROK_AGENT_SECRET" >&2
+    exit 1
+  fi
+  exec grok agent --always-approve --no-subagents --no-plan "$@" \
+    serve --bind "$bind" --secret "$GROK_AGENT_SECRET"
+fi
+
 exec grok "$@"

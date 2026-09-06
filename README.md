@@ -8,9 +8,11 @@ Grok Build coding agent be the harness: each tick is one headless invocation
 through the RLE MCP tools (`rle__get_brief`, `rle__work_priority`, … `rle__end_turn`), and
 the writes that reached the game are scored with the same composite as every other harness.
 
-**OpenCode-parity lifecycle experiment:** default stays cold-start (`docker run --rm` or
-host `grok -p` every tick). `--harness-opt warm=true` (alias `persistent=true`) keeps one
-Docker sidecar alive across ticks — see [Warm persist](#warm-persist-opencode-parity-spike).
+**OpenCode-parity lifecycle:** default stays cold-start (`docker run --rm` or
+host `grok -p` every tick). `--harness-opt warm=true` keeps one Docker sidecar
+and `docker exec`s `grok -p` each tick. `--harness-opt acp=true` (alias
+`mode=acp`) starts long-lived `grok agent serve` and drives each tick over ACP
+— see [ACP agent serve](#acp-agent-serve-opencode-parity).
 
 ## Install
 
@@ -43,6 +45,9 @@ Options (`--harness-opt key=value`):
 |---|---|---|
 | `binary` | `grok` | Executable name/path |
 | `warm` / `persistent` | false | Start one grok-docker container in setup; `docker exec` each tick |
+| `acp` / `mode=acp` | false | Long-lived `grok agent serve`; each tick is ACP `session/prompt` |
+| `acp_bind` | `127.0.0.1:<ephemeral>` | Host `host:port` for serve (Docker publishes this to container `:2419`) |
+| `acp_secret` | generated | Serve auth (`Authorization: Bearer` / `?server-key=`) |
 | `resume_session` | true | `--resume <sessionId>` every tick so context carries over |
 | `max_turns` | 20 | `--max-turns` cap on agentic rounds per tick |
 | `reasoning_effort` | – | `--reasoning-effort` |
@@ -203,7 +208,80 @@ Compare the same seed/scoring/timeout with and without `warm=true`:
    ledger/tool event (not model TTFT). Cold docker median was ~123s to first action;
    bare `grok -p` ~5–10s; direct xAI tiny call ~0.7s.
 3. Tick 0 vs later ticks: persist should drop per-tick `docker run` boot; if TTFA stays
-   huge, remaining cost is `grok -p` MCP/tool init (next experiment: ACP `agent serve`).
+   huge, remaining cost is `grok -p` MCP/tool init — use `acp=true` for process-level
+   parity with OpenCode.
+
+## ACP agent serve (OpenCode parity)
+
+OpenCode keeps one `opencode serve` and POSTs each tick (~15s TTFA). Warm persist
+(#7) keeps the Docker container but still runs `grok -p` per tick (tick-0 TTFA
+still tens of seconds). Documented Grok long-lived mode is ACP:
+
+```bash
+grok agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
+grok agent --always-approve --model grok-4.6 stdio
+```
+
+This harness uses the **HTTP / WebSocket bind** path (not stdio):
+
+1. `start_agent` spawns `grok agent --always-approve serve --bind … --secret …`
+   (host process, or `acp-serve` as PID 1 inside the persist container).
+2. Client connects to `ws://127.0.0.1:<port>/ws` with `Authorization: Bearer`
+   and `?server-key=` (same auth as xai-org/grok-build `server.rs`).
+3. Once: ACP `initialize` then `session/new` (`cwd`, `_meta.yoloMode`, empty
+   `mcpServers` — RLE MCP still comes from isolated `GROK_HOME` `config.toml`).
+4. Each tick: ACP `session/prompt` with the turn text; wait for the JSON-RPC
+   result (`stopReason`: `end_turn` / `max_turn_requests` / `cancelled` / …)
+   and `session/update` chunks. `turn_timeout_s` still applies; timeout sends
+   `session/cancel` (does **not** kill the serve process).
+5. Teardown: `session/close` when advertised, then stop serve / `docker stop`.
+
+Default remains today's `-p` / warm path. `acp=true` on a grok-docker wrapper
+implies a persist container (serve must stay up). Windows still uses
+`RLE_GROK_ARGV_JSON` for wrapper start/healthcheck; tick prompts go over
+WebSocket, not `docker exec` argv.
+
+### Enable + Crashlanded rematch (RLE bot)
+
+`--harness-opt acp=true` (or `mode=acp`). Seed **42** / scoring **1.2** /
+`turn_timeout_s=300`:
+
+```powershell
+$env:XAI_API_KEY = "xai-..."
+python scripts/run_scenario.py crashlanded --harness grok-build --model grok-4.6 `
+  --seed 42 --scoring 1.2 --ticks 10 --tick-interval 30 `
+  --harness-opt "binary=.\docker\grok-docker.cmd" `
+  --harness-opt acp=true `
+  --harness-opt turn_timeout_s=300 `
+  --harness-opt mcp_container_reachable=true `
+  --harness-opt mcp_advertise_url=http://host.docker.internal:8766/mcp
+```
+
+Unix:
+
+```bash
+python scripts/run_scenario.py crashlanded --harness grok-build --model grok-4.6 \
+  --seed 42 --scoring 1.2 --ticks 10 --tick-interval 30 \
+  --harness-opt binary=./docker/grok-docker.sh \
+  --harness-opt acp=true \
+  --harness-opt turn_timeout_s=300 \
+  --harness-opt mcp_container_reachable=true \
+  --harness-opt mcp_advertise_url=http://host.docker.internal:8766/mcp
+```
+
+Same knobs as warm: `binary`, `max_turns`, `disallowed_tools`, `XAI_API_KEY`,
+`mcp_advertise_url`, `mcp_container_reachable`, `GROK_DOCKER_HOME_VOLUME`.
+
+### How to measure TTFA (ACP vs warm vs cold)
+
+Same seed/scoring/timeout; compare `acp=true` vs `warm=true` vs default:
+
+1. **Tick latency** — `deliberation_log[].latency_ms` / `extras.latency_ms`.
+2. **TTFA** — wall clock from turn start to the first `rle__*` ledger/tool
+   event (not model TTFT). OpenCode reference ~15s; warm docker tick 0 was ~75s.
+3. Tick 0 vs later ticks. ACP should keep MCP/tool surface warm across ticks
+   the way OpenCode's serve process does. `extras.stop_reason` and
+   `extras.acp=true` mark ACP turns.
 
 ## How it works
 
@@ -213,6 +291,7 @@ Compare the same seed/scoring/timeout with and without `warm=true`:
   --no-plan [-m model] [--resume sid] …` (or `docker run --rm` via the wrapper).
 - Warm: `docker run -d --name rle-grok-…` once, then `docker exec … /entrypoint.sh grok -p …`
   each tick; `sessionId`, `usage` and `total_cost_usd` from the JSON object feed RLE's tracking.
+- ACP: one `grok agent serve` WebSocket; each tick is `session/prompt` until `stopReason`.
 - `--smoke-test` needs no Grok Build: a scripted agent plays the same MCP round trip.
 
 ## Development
