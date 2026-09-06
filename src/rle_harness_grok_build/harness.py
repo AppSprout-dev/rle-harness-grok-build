@@ -7,12 +7,17 @@ Surface used (grok-build ``docs/user-guide/14-headless-mode.md`` and
   [--resume <sessionId>] [--max-turns N] [--disallowed-tools ...]``
   -> one JSON object: ``text``, ``sessionId``, ``usage{input_tokens,
   output_tokens, reasoning_tokens,...}``, ``total_cost_usd`` (when complete)
-* Project-scoped MCP config ``<workdir>/.grok/config.toml``::
+* Isolated ``GROK_HOME`` (temp) with RLE-only MCP so the user's global
+  ``~/.grok/config.toml`` MCP zoo cannot drown out ``rle__*`` tools::
 
       [mcp_servers.rle]
       url = "http://127.0.0.1:PORT/mcp"
+      startup_timeout_sec = 30
+      headers = { "x-mcp-session-id" = "{{session_id}}" }
 
   Tools are namespaced ``rle__<tool>`` (``rle__get_brief``, ``rle__end_turn``).
+* Auth is copied from the real ``~/.grok`` (``auth.json``, optional
+  ``mcp_credentials.json``) into the isolated home.
 * Exit codes: 0 ok, 1 error, 130/143 interrupted.
 """
 
@@ -37,14 +42,41 @@ logger = logging.getLogger(__name__)
 
 MCP_SERVER_NAME = "rle"
 
+# Auth files to copy from the real ~/.grok into the isolated GROK_HOME.
+_AUTH_FILENAMES = ("auth.json", "mcp_credentials.json")
+
 TOOL_NAMING_NOTE = (
     "In this environment the RLE tools are namespaced by server: call rle__get_brief, "
-    "rle__work_priority, rle__blueprint, ..., and finish with rle__end_turn."
+    "rle__work_priority, rle__blueprint, ..., and finish with rle__end_turn. "
+    "The only MCP server available is rle — do not search for other tools."
 )
 
 
 def mcp_config_toml(mcp_url: str) -> str:
-    return f'[mcp_servers.{MCP_SERVER_NAME}]\nurl = "{mcp_url}"\n'
+    """RLE-only MCP config. Session header matches grok-build docs."""
+    return (
+        f"[mcp_servers.{MCP_SERVER_NAME}]\n"
+        f'url = "{mcp_url}"\n'
+        f"startup_timeout_sec = 30\n"
+        f'headers = {{ "x-mcp-session-id" = "{{{{session_id}}}}" }}\n'
+    )
+
+
+def _real_grok_home() -> Path:
+    """User's actual Grok home (ignores a leftover GROK_HOME from a prior run)."""
+    return Path.home() / ".grok"
+
+
+def _copy_auth_into(dest: Path) -> None:
+    src = _real_grok_home()
+    if not src.is_dir():
+        logger.warning("no %s — headless auth may fail without XAI_API_KEY", src)
+        return
+    for name in _AUTH_FILENAMES:
+        path = src / name
+        if path.is_file():
+            shutil.copy2(path, dest / name)
+            logger.debug("copied %s into isolated GROK_HOME", name)
 
 
 def build_command(
@@ -122,6 +154,8 @@ class GrokBuildHarness(HeadlessCliHarness):
         self.opts = options
         self._binary: str | None = None
         self._workdir: str | None = None
+        self._grok_home: Path | None = None
+        self._prev_grok_home: str | None = None
         self._session_id: str | None = None
         self._proc: asyncio.subprocess.Process | None = None
 
@@ -131,9 +165,22 @@ class GrokBuildHarness(HeadlessCliHarness):
             raise HarnessStepError(f"Grok Build binary {self.opts.binary!r} not found on PATH")
         self._binary = binary
         self._workdir = tempfile.mkdtemp(prefix="rle-grok-")
+        # Isolate from the user's ~/.grok MCP zoo (wandb, stripe, HF, …).
+        # Without this, grok burns the turn tool-searching and never hits rle__*.
+        self._grok_home = Path(tempfile.mkdtemp(prefix="rle-grok-home-"))
+        self._prev_grok_home = os.environ.get("GROK_HOME")
+        os.environ["GROK_HOME"] = str(self._grok_home)
+        _copy_auth_into(self._grok_home)
+        cfg_text = mcp_config_toml(mcp_url)
+        (self._grok_home / "config.toml").write_text(cfg_text, encoding="utf-8")
+        # Project-scoped copy too (cwd priority / defense in depth).
         cfg_dir = Path(self._workdir) / ".grok"
         cfg_dir.mkdir()
-        (cfg_dir / "config.toml").write_text(mcp_config_toml(mcp_url))
+        (cfg_dir / "config.toml").write_text(cfg_text, encoding="utf-8")
+        logger.info(
+            "isolated GROK_HOME=%s with RLE-only MCP at %s",
+            self._grok_home, mcp_url,
+        )
         if not os.environ.get(self.opts.api_key_env):
             logger.info(
                 "%s not set — relying on Grok Build's cached login for headless auth",
@@ -142,6 +189,12 @@ class GrokBuildHarness(HeadlessCliHarness):
 
     def render_prompt(self, brief: Any) -> str:
         return super().render_prompt(brief) + "\n\n" + TOOL_NAMING_NOTE
+
+    def _subprocess_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        if self._grok_home is not None:
+            env["GROK_HOME"] = str(self._grok_home)
+        return env
 
     async def send_turn(self, prompt: str) -> TurnResult:
         assert self._binary is not None and self._workdir is not None
@@ -154,6 +207,7 @@ class GrokBuildHarness(HeadlessCliHarness):
         self._proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=self._workdir,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=self._subprocess_env(),
         )
         try:
             stdout_b, stderr_b = await self._proc.communicate()
@@ -164,6 +218,8 @@ class GrokBuildHarness(HeadlessCliHarness):
         self._proc = None
         stdout = stdout_b.decode("utf-8", errors="replace")
         stderr = stderr_b.decode("utf-8", errors="replace")
+        if stderr.strip():
+            logger.debug("grok stderr (tail): %s", stderr.strip()[-1500:])
         if returncode != 0:
             raise HarnessStepError(
                 f"grok exited {returncode}: {(stderr or stdout).strip()[-800:]}",
@@ -179,9 +235,22 @@ class GrokBuildHarness(HeadlessCliHarness):
         if proc is not None and proc.returncode is None:
             proc.terminate()
             try:
-                await asyncio.wait_for(proc.wait(), timeout=10)
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=10)
+                stderr = (stderr_b or b"").decode("utf-8", errors="replace").strip()
+                if stderr:
+                    logger.warning("grok turn aborted; stderr (tail): %s", stderr[-2000:])
+                stdout = (stdout_b or b"").decode("utf-8", errors="replace").strip()
+                if stdout and not stderr:
+                    logger.warning("grok turn aborted; stdout (tail): %s", stdout[-2000:])
             except asyncio.TimeoutError:
                 proc.kill()
+                logger.warning("grok turn aborted; process kill after communicate timeout")
+            except Exception as exc:  # noqa: BLE001 — best-effort drain
+                logger.warning("grok turn aborted; failed to drain output: %s", exc)
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
         self._proc = None
 
     async def stop_agent(self) -> None:
@@ -189,6 +258,14 @@ class GrokBuildHarness(HeadlessCliHarness):
         if self._workdir is not None:
             shutil.rmtree(self._workdir, ignore_errors=True)
             self._workdir = None
+        if self._grok_home is not None:
+            shutil.rmtree(self._grok_home, ignore_errors=True)
+            self._grok_home = None
+        if self._prev_grok_home is None:
+            os.environ.pop("GROK_HOME", None)
+        else:
+            os.environ["GROK_HOME"] = self._prev_grok_home
+        self._prev_grok_home = None
 
     def agent_versions(self) -> dict[str, str]:
         return {"grok-build": binary_version(self.opts.binary)}

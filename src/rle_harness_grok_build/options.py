@@ -13,8 +13,11 @@ class GrokBuildOptions(HeadlessCliOptions):
         description="Resume the same headless session every tick (context carries over).",
     )
     max_turns: int | None = Field(
-        default=None, ge=1,
-        description="Cap on agentic rounds per tick (--max-turns).",
+        default=20, ge=1,
+        description=(
+            "Cap on agentic rounds per tick (--max-turns). Default 20 so a lost "
+            "tool-search loop cannot burn the full turn timeout with zero RLE actions."
+        ),
     )
     reasoning_effort: str | None = Field(
         default=None, description="Passed as --reasoning-effort when set.",
