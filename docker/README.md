@@ -74,7 +74,9 @@ Expect **rle** and not wandb/claude/cursor as MCP servers.
 ## Run wrappers (host harness → container grok)
 
 After the RLE McpHost PR, point the host harness at the wrapper so each
-`grok -p` tick is stock Linux grok:
+`grok -p` tick is stock Linux grok. Default is `docker run --rm` per tick.
+`--harness-opt warm=true` (alias `persistent=true`) starts one named container
+(`persist` keepalive) and `docker exec /entrypoint.sh` each turn:
 
 ```powershell
 $env:XAI_API_KEY = "xai-..."
@@ -102,6 +104,8 @@ Wrappers:
   (Docker Desktop exit 125 Access is denied) and rely on `MCP_URL` + empty
   container `GROK_HOME` (entrypoint writes config)
 * optional `GROK_DOCKER_HOME_VOLUME` named volume for session persist across `--rm`
+* warm persist: `RLE_GROK_PERSIST_CONTAINER` + `RLE_GROK_PERSIST_ACTION=start|exec|stop`
+  (`docker run -d --name`, `docker exec /entrypoint.sh`, `docker stop`/`rm`)
 * forward `XAI_API_KEY` / `GROK_AUTH_JSON`
 * load grok argv from `RLE_GROK_ARGV_JSON` (UTF-8 JSON array) when the harness
   sets it — required on Windows because `grok-docker.cmd` → `powershell -File

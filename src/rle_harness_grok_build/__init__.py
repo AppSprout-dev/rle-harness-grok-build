@@ -10,6 +10,7 @@ benchmarks *Grok Build as the harness* on the same scenarios, saves and
 scoring as every other harness. Each tick is one headless invocation
 (``grok -p ... --output-format json``) resuming the previous session; the
 agent acts through the RLE MCP tools and calls ``rle__end_turn``.
+``--harness-opt warm=true`` keeps one grok-docker container alive across ticks.
 """
 
 from rle_harness_grok_build.plugin import PLUGIN, GrokBuildPlugin

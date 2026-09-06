@@ -47,3 +47,20 @@ class GrokBuildOptions(HeadlessCliOptions):
             "(requires RLE McpHost bound on 0.0.0.0:8766 — sibling RLE PR)."
         ),
     )
+    warm: bool = Field(
+        default=False,
+        description=(
+            "OpenCode-parity lifecycle: start one grok-docker container in setup, "
+            "docker exec grok -p --resume each tick, stop in teardown. Default "
+            "false keeps today's docker run --rm (or host grok -p) per tick. "
+            "No-op for a non-wrapper binary (isolated GROK_HOME + --resume only)."
+        ),
+    )
+    persistent: bool = Field(
+        default=False,
+        description="Alias for warm. Either --harness-opt enables the persist path.",
+    )
+
+    @property
+    def warm_enabled(self) -> bool:
+        return self.warm or self.persistent
