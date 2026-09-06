@@ -62,7 +62,7 @@ if [[ "${1:-}" == "acp-serve" ]]; then
     echo "acp-serve requires GROK_AGENT_SECRET" >&2
     exit 1
   fi
-  exec grok agent --always-approve --no-subagents --no-plan "$@" \
+  exec grok agent --always-approve "$@" \
     serve --bind "$bind" --secret "$GROK_AGENT_SECRET"
 fi
 
