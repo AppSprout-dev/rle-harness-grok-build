@@ -1,22 +1,22 @@
-# Stock grok-build + this RLE harness. Isolated GROK_HOME at runtime.
+# Stock Linux grok-build only. Isolated GROK_HOME at runtime.
 # Does not bake secrets. Does not copy host ~/.grok or ~/.claude.json.
+# Does not run RimWorld — Windows Steam RimWorld + RIMAPI stay on the host.
 #
-# Linux binaries are published by xAI (x.ai/cli/install.sh):
+# Pinned artifact (xAI public CLI):
 #   https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-<ver>-linux-x86_64
 #   https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-<ver>-linux-aarch64
 #
 # Build: docker build -f docker/Dockerfile -t rle-grok-build:local .
-# Run:   docker run --rm -e XAI_API_KEY rle-grok-build:local smoke
+# Smoke: docker run --rm rle-grok-build:local mcp list
 
-FROM python:3.14-slim-bookworm
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git zstd \
+        ca-certificates curl zstd \
     && rm -rf /var/lib/apt/lists/*
 
-# Install the official Linux grok binary into a disposable HOME so the
-# installer-written ~/.grok/config.toml is discarded. Runtime GROK_HOME is empty.
-ARG GROK_VERSION=
+# Official Linux grok into a disposable HOME so installer config.toml is discarded.
+ARG GROK_VERSION=1.0.13
 ENV GROK_BIN_DIR=/opt/grok/bin
 RUN mkdir -p /tmp/grok-install-home /opt/grok/bin \
     && HOME=/tmp/grok-install-home \
@@ -26,29 +26,20 @@ RUN mkdir -p /tmp/grok-install-home /opt/grok/bin \
     && grok --version \
     && test ! -e /root/.grok/config.toml
 
-WORKDIR /opt/harness
-COPY pyproject.toml README.md LICENSE ./
-COPY src ./src
-
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir \
-        "rimworld-learning-environment[mcp] @ git+https://github.com/AppSprout-dev/RLE" \
-        .
-
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh \
-    && useradd --create-home --uid 1000 --shell /bin/bash rle \
-    && mkdir -p /home/rle/.grok /auth /work \
-    && chown -R rle:rle /home/rle /auth /work
+    && useradd --create-home --uid 1000 --shell /bin/bash grok \
+    && mkdir -p /home/grok/.grok /auth /work \
+    && chown -R grok:grok /home/grok /auth /work
 
-# Isolated runtime home. Auth arrives via XAI_API_KEY or /auth/auth.json.
-ENV GROK_HOME=/home/rle/.grok \
-    HOME=/home/rle \
-    PYTHONUNBUFFERED=1 \
-    RIMAPI_URL=http://host.docker.internal:8765 \
+# Empty writable home. Auth: XAI_API_KEY or /auth/auth.json.
+# MCP_URL is the *advertised* RLE McpHost URL (sibling RLE PR: 0.0.0.0:8766).
+ENV GROK_HOME=/home/grok/.grok \
+    HOME=/home/grok \
+    MCP_URL=http://host.docker.internal:8766/mcp \
     PATH=/usr/local/bin:/usr/bin:/bin
 
-USER rle
+USER grok
 WORKDIR /work
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["smoke"]
+CMD ["mcp", "list"]

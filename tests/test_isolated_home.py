@@ -7,17 +7,18 @@ from pathlib import Path
 
 import pytest
 
-from rle_harness_grok_build.docker_cli import DockerCommand, build_parser, find_scenario
 from rle_harness_grok_build.harness import mcp_config_toml as harness_mcp_config_toml
 from rle_harness_grok_build.isolated_home import (
-    DEFAULT_COMPOSE_RIMWORLD_URL,
-    DEFAULT_DOCKER_RIMAPI_URL,
-    DEFAULT_SMOKE_MCP_URL,
+    DEFAULT_ADVERTISED_MCP_URL,
+    DEFAULT_HOST_RIMAPI_URL,
     FORBIDDEN_HOST_BIND_SOURCES,
     check_mcp_list_output,
+    effective_mcp_url,
+    is_host_plugin_home,
     mcp_config_toml,
     prepare_runtime_grok_home,
     resolve_auth_json,
+    resolve_binary,
     resolve_mcp_url,
     resolve_rimapi_url,
     wipe_plugin_pollution,
@@ -42,24 +43,26 @@ class TestMcpConfig:
 
 
 class TestUrlResolution:
-    def test_rimapi_flag_wins(self) -> None:
-        assert resolve_rimapi_url("http://rimworld:8765/", env={"RIMAPI_URL": "http://other"}) == (
-            "http://rimworld:8765"
+    def test_rimapi_is_host_localhost(self) -> None:
+        assert resolve_rimapi_url("http://127.0.0.1:8765/", env={"RIMAPI_URL": "http://other"}) == (
+            "http://127.0.0.1:8765"
         )
-
-    def test_rimapi_env_then_default(self) -> None:
         assert resolve_rimapi_url(None, env={"RIMAPI_URL": "http://host:8765/"}) == "http://host:8765"
-        assert resolve_rimapi_url(None, env={}) == DEFAULT_DOCKER_RIMAPI_URL
+        assert resolve_rimapi_url(None, env={}) == DEFAULT_HOST_RIMAPI_URL
 
-    def test_mcp_url(self) -> None:
+    def test_mcp_url_defaults_to_advertised(self) -> None:
         assert resolve_mcp_url("http://127.0.0.1:1/mcp", env={"MCP_URL": "x"}) == (
             "http://127.0.0.1:1/mcp"
         )
         assert resolve_mcp_url(None, env={"MCP_URL": "http://in/mcp"}) == "http://in/mcp"
-        assert resolve_mcp_url(None, env={}) == DEFAULT_SMOKE_MCP_URL
+        assert resolve_mcp_url(None, env={}) == DEFAULT_ADVERTISED_MCP_URL
+        assert DEFAULT_ADVERTISED_MCP_URL == "http://host.docker.internal:8766/mcp"
 
-    def test_compose_hostname_constant(self) -> None:
-        assert DEFAULT_COMPOSE_RIMWORLD_URL == "http://rimworld:8765"
+    def test_effective_mcp_url_advertise_wins(self) -> None:
+        bind = "http://127.0.0.1:54321/mcp"
+        adv = "http://host.docker.internal:8766/mcp"
+        assert effective_mcp_url(bind, None) == bind
+        assert effective_mcp_url(bind, adv) == adv
 
 
 class TestAuthAndForbiddenMounts:
@@ -77,20 +80,32 @@ class TestAuthAndForbiddenMounts:
         assert "~/.claude.json" in FORBIDDEN_HOST_BIND_SOURCES
         assert "~/.cursor" in FORBIDDEN_HOST_BIND_SOURCES
 
+    def test_is_host_plugin_home(self, tmp_path: Path) -> None:
+        assert is_host_plugin_home(Path.home() / ".grok")
+        assert not is_host_plugin_home(tmp_path / "rle-grok-home-xyz")
+
+
+class TestResolveBinary:
+    def test_direct_path(self, tmp_path: Path) -> None:
+        script = tmp_path / "grok-docker.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        script.chmod(0o755)
+        assert resolve_binary(str(script)) == str(script.resolve())
+
+    def test_missing(self) -> None:
+        assert resolve_binary("definitely-not-a-grok-binary-9cb3") is None
+
 
 class TestWriteIsolatedHome:
     def test_writes_config_and_optional_auth_only(self, tmp_path: Path) -> None:
         home = tmp_path / "grok-home"
         auth = tmp_path / "auth.json"
         auth.write_text('{"token":"x"}', encoding="utf-8")
-        host_config = tmp_path / "host-config.toml"
-        host_config.write_text("[mcp_servers.wandb]\nurl = \"http://wandb\"\n", encoding="utf-8")
         write_isolated_grok_home(home, "http://127.0.0.1:9/mcp", auth_json=auth)
         written = (home / "config.toml").read_text(encoding="utf-8")
         assert written == mcp_config_toml("http://127.0.0.1:9/mcp")
         assert (home / "auth.json").read_text(encoding="utf-8") == '{"token":"x"}'
         assert not (home / "plugins").exists()
-        # Host config.toml is never consulted.
         assert "wandb" not in written
 
     def test_skips_empty_auth(self, tmp_path: Path) -> None:
@@ -138,25 +153,3 @@ class TestMcpListHealth:
     def test_rejects_compat_zoo(self) -> None:
         with pytest.raises(ValueError, match="unexpected compatibility"):
             check_mcp_list_output("rle\nwandb  https://api.wandb.ai")
-
-
-class TestDockerCliParser:
-    def test_smoke_and_cal_flags(self) -> None:
-        parser = build_parser()
-        smoke = parser.parse_args(["smoke", "--call-tool", "--mcp-url", "http://x/mcp"])
-        assert smoke.command == DockerCommand.SMOKE.value
-        assert smoke.call_tool and smoke.mcp_url == "http://x/mcp"
-        cal = parser.parse_args(
-            ["cal", "--ticks", "3", "--scenario", "crashlanded", "--rimapi-url", "http://rimworld:8765"],
-        )
-        assert cal.command == DockerCommand.CAL.value
-        assert cal.ticks == 3
-        assert cal.rimapi_url == "http://rimworld:8765"
-
-    def test_find_scenario_crashlanded(self) -> None:
-        scenario = find_scenario("crashlanded")
-        assert "crash" in scenario.name.lower() or "crashlanded" in scenario.name.lower()
-
-    def test_find_scenario_missing(self, tmp_path: Path) -> None:
-        with pytest.raises(FileNotFoundError, match="not found"):
-            find_scenario("definitely-missing", definitions_dir=tmp_path)

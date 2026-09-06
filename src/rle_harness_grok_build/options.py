@@ -39,3 +39,11 @@ class GrokBuildOptions(HeadlessCliOptions):
     extra_args: list[str] = Field(
         default_factory=list, description="Additional raw flags appended to every invocation.",
     )
+    mcp_advertise_url: str | None = Field(
+        default=None,
+        description=(
+            "URL written into grok config.toml instead of the in-process bind URL. "
+            "For stock grok-in-Docker use http://host.docker.internal:8766/mcp "
+            "(requires RLE McpHost bound on 0.0.0.0:8766 — sibling RLE PR)."
+        ),
+    )

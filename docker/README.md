@@ -1,30 +1,47 @@
-# Stock grok-build Docker (plugin-free)
+# Stock Linux grok (plugin-free sidecar)
 
-One image: official Linux `grok` + this Python harness + RLE. Runtime
-`GROK_HOME` is empty except an RLE-only `config.toml` (compat Claude/Cursor
-MCPs off). Auth is `XAI_API_KEY` or a mounted `auth.json` file.
+Container = **official Linux `grok` only**. Windows Steam RimWorld + RIMAPI
+stay on the **host** (`localhost:8765`). This image does not run RimWorld.
 
-This is the escape hatch when host Windows grok still loads desktop plugins
-after the GROK_HOME isolation patches (PRs #1 / #2).
+Host desktop grok loads Claude/Cursor compat MCPs and plugins even after
+GROK_HOME isolation (PRs #1 / #2). This sidecar starts from an empty
+`GROK_HOME` and writes an RLE-only `config.toml`.
 
-RimAPI stays outside this image. Talk to RLE's headless RimWorld on port
-**8765** (`rle.docker.DEFAULT_PORT`, compose service `rimworld`).
+RLE's own Linux headless RimWorld image (`AppSprout-dev/RLE/docker/`) is a
+**separate** path. Third-party harness Docker stays in this repo.
 
-## Build
+## Prerequisite — RLE `McpHost` bind (sibling PR)
+
+Today RLE's `McpHost` binds `127.0.0.1` plus an ephemeral port. A process
+inside Docker **cannot** reach that.
+
+The sibling RLE change must:
+
+1. Bind `0.0.0.0` (not loopback-only)
+2. Use a fixed / configurable port (default **8766**)
+3. Advertise `http://host.docker.internal:8766/mcp` to agents in Docker
+
+This repo's compose and wrappers assume that advertised URL and pass
+`--add-host host.docker.internal:host-gateway`.
+
+Until that lands:
+
+* `grok mcp list` smoke (CI / local) works — it only reads isolated config
+* Live `rle__*` tool calls from the container will fail to connect
+
+Host RimAPI remains `http://127.0.0.1:8765`. The MCP server (in the host
+Python harness) is what grok-in-Docker must dial, on **8766**.
+
+## Build (pinned Linux grok)
+
+Default pin is `GROK_VERSION=1.0.13` (linux-x86_64 / linux-aarch64).
 
 ```bash
 docker build -f docker/Dockerfile -t rle-grok-build:local .
 ```
 
-Pin a grok release if you want a reproducible binary:
-
-```bash
-docker build -f docker/Dockerfile --build-arg GROK_VERSION=1.0.13 -t rle-grok-build:local .
-```
-
-The Dockerfile downloads the stock Linux artifact from
-`https://x.ai/cli/install.sh` (linux-x86_64 / linux-aarch64). No host grok
-binary is copied in.
+Docker Desktop CLI may be installed while the **daemon is stopped**. Start
+Docker Desktop before build/run; wrappers exit with a clear error otherwise.
 
 ## Auth (do not bake secrets)
 
@@ -34,79 +51,63 @@ Preferred:
 export XAI_API_KEY=xai-...
 ```
 
-Or mount **only** `auth.json` (the file produced by `grok login`, not the
-whole `~/.grok` tree):
-
-```bash
-docker run --rm \
-  -e XAI_API_KEY \
-  -v /abs/path/to/auth.json:/auth/auth.json:ro \
-  rle-grok-build:local smoke
-```
-
-## Smoke (no RimWorld)
-
-Proves `grok mcp list` sees **rle** and not wandb/claude/cursor:
-
-```bash
-docker run --rm rle-grok-build:local smoke
-```
-
-Optional: in-process MockRimAPI + headless `-p` tool call (~60s, needs a key):
-
-```bash
-docker run --rm -e XAI_API_KEY rle-grok-build:local \
-  smoke --call-tool --model grok-4.6
-```
-
-## One-tick Crashlanded (RimAPI required)
-
-Docker Desktop / host RimAPI on 8765 (`extra_hosts` is in compose):
-
-```bash
-docker compose -f docker/docker-compose.yml run --rm grok-harness \
-  cal --ticks 1 --scenario crashlanded --model grok-4.6
-```
-
-Same with a raw `docker run`:
+Or mount **only** `auth.json` (not the whole `~/.grok` tree):
 
 ```bash
 docker run --rm --add-host=host.docker.internal:host-gateway \
-  -e XAI_API_KEY \
-  -e RIMAPI_URL=http://host.docker.internal:8765 \
-  rle-grok-build:local \
-  cal --ticks 1 --scenario crashlanded --model grok-4.6
+  -e XAI_API_KEY -e MCP_URL=http://host.docker.internal:8766/mcp \
+  -v /abs/path/to/auth.json:/auth/auth.json:ro \
+  rle-grok-build:local mcp list
 ```
 
-### Join RLE's existing compose network
-
-RLE's `docker/docker-compose.yml` publishes `rimworld:8765`. After that stack
-is up:
+## Smoke (no RimWorld, CI-safe)
 
 ```bash
-docker network ls   # note the project_default network
-export RLE_COMPOSE_NETWORK=docker_default
-docker compose -f docker/docker-compose.yml \
-  -f docker/docker-compose.rle-network.yml \
-  run --rm grok-harness cal --ticks 1
+docker run --rm rle-grok-build:local mcp list
+# or
+./docker/grok-docker.sh mcp list          # Unix
+.\docker\grok-docker.cmd mcp list        # Windows
 ```
 
-That overlay sets `RIMAPI_URL=http://rimworld:8765`.
+Expect **rle** and not wandb/claude/cursor as MCP servers.
+
+## Run wrappers (host harness → container grok)
+
+After the RLE McpHost PR, point the host harness at the wrapper so each
+`grok -p` tick is stock Linux grok:
+
+```powershell
+$env:XAI_API_KEY = "xai-..."
+$env:MCP_URL = "http://host.docker.internal:8766/mcp"
+python scripts/run_scenario.py crashlanded --harness grok-build `
+  --model grok-4.6 --ticks 1 `
+  --harness-opt "binary=C:\path\to\rle-harness-grok-build\docker\grok-docker.cmd" `
+  --harness-opt "mcp_advertise_url=http://host.docker.internal:8766/mcp"
+```
+
+Unix:
+
+```bash
+python scripts/run_scenario.py crashlanded --harness grok-build \
+  --harness-opt binary=./docker/grok-docker.sh \
+  --harness-opt mcp_advertise_url=http://host.docker.internal:8766/mcp
+```
+
+Wrappers:
+
+* inject `host.docker.internal:host-gateway`
+* rewrite `--cwd <host>` → mount + `/work`
+* mount a **temp** `GROK_HOME` (harness-created) but **refuse** `~/.grok`
+* forward `XAI_API_KEY` / `GROK_AUTH_JSON`
 
 ## What is deliberately NOT mounted
 
 | Host path | Why |
 |---|---|
 | `~/.grok` | Plugins, skills, installer `config.toml`, MCP zoo |
-| `~/.grok/config.toml` | Compat MCP imports (Claude/Cursor) |
+| `~/.grok/config.toml` | Compat MCP imports |
 | `~/.claude.json` / `~/.claude` | Claude compatibility MCP discovery |
 | `~/.cursor` | Cursor compatibility MCP discovery |
 
-The entrypoint also unsets `CLAUDE_CONFIG_DIR` / `CURSOR_CONFIG_DIR`.
-
-## Design note
-
-**grok + harness in one image** (not a grok-only sidecar). RLE hosts the MCP
-server in-process on localhost inside the container; grok talks to that. The
-container only needs network reachability to RimAPI (and xAI for the model).
-Host-side `python scripts/run_scenario.py --harness grok-build` is unchanged.
+The entrypoint unsets `CLAUDE_CONFIG_DIR` / `CURSOR_CONFIG_DIR` and rewrites
+`config.toml` from `MCP_URL` on every start.

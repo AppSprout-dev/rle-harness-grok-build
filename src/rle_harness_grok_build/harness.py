@@ -40,7 +40,9 @@ from rle.harness.cli_base import HeadlessCliHarness, TurnResult
 from rle_harness_grok_build.isolated_home import (
     AUTH_FILENAMES,
     check_mcp_list_output,
+    effective_mcp_url,
     mcp_config_toml,
+    resolve_binary,
     write_project_grok_config,
 )
 from rle_harness_grok_build.options import GrokBuildOptions
@@ -164,6 +166,7 @@ class GrokBuildHarness(HeadlessCliHarness):
         self._prev_grok_home: str | None = None
         self._session_id: str | None = None
         self._proc: asyncio.subprocess.Process | None = None
+        self._mcp_url: str | None = None
 
     async def _healthcheck_mcp(self) -> None:
         """Verify the isolated config exposes only the RLE MCP server."""
@@ -191,7 +194,7 @@ class GrokBuildHarness(HeadlessCliHarness):
         logger.info("grok MCP healthcheck passed: rle is available")
 
     async def start_agent(self, mcp_url: str) -> None:
-        binary = shutil.which(self.opts.binary)
+        binary = resolve_binary(self.opts.binary)
         if binary is None:
             raise HarnessStepError(f"Grok Build binary {self.opts.binary!r} not found on PATH")
         self._binary = binary
@@ -201,13 +204,15 @@ class GrokBuildHarness(HeadlessCliHarness):
         self._grok_home = Path(tempfile.mkdtemp(prefix="rle-grok-home-"))
         self._prev_grok_home = os.environ.get("GROK_HOME")
         os.environ["GROK_HOME"] = str(self._grok_home)
+        cfg_url = effective_mcp_url(mcp_url, self.opts.mcp_advertise_url)
+        self._mcp_url = cfg_url
         _copy_auth_into(self._grok_home)
-        (self._grok_home / "config.toml").write_text(mcp_config_toml(mcp_url), encoding="utf-8")
+        (self._grok_home / "config.toml").write_text(mcp_config_toml(cfg_url), encoding="utf-8")
         # Project-scoped copy too (cwd priority / defense in depth).
-        write_project_grok_config(Path(self._workdir), mcp_url)
+        write_project_grok_config(Path(self._workdir), cfg_url)
         logger.info(
             "isolated GROK_HOME=%s with RLE-only MCP at %s",
-            self._grok_home, mcp_url,
+            self._grok_home, cfg_url,
         )
         await self._healthcheck_mcp()
         if not os.environ.get(self.opts.api_key_env):
@@ -223,6 +228,8 @@ class GrokBuildHarness(HeadlessCliHarness):
         env = os.environ.copy()
         if self._grok_home is not None:
             env["GROK_HOME"] = str(self._grok_home)
+        if self._mcp_url is not None:
+            env["MCP_URL"] = self._mcp_url
         return env
 
     async def send_turn(self, prompt: str) -> TurnResult:

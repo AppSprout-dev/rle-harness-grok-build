@@ -28,24 +28,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Probe Linux grok-build artifact
+      - name: Probe pinned Linux grok-build artifact
         id: probe
         run: |
           set -euo pipefail
-          ver=$(curl -fsSL https://x.ai/cli/stable || curl -fsSL https://storage.googleapis.com/grok-build-public-artifacts/cli/stable)
-          ver=$(printf '%s' "$ver" | tr -d '\r[:space:]')
-          echo "version=$ver" >> "$GITHUB_OUTPUT"
-          echo "Stable grok version: $ver"
+          pin=$(sed -n 's/^ARG GROK_VERSION=//p' docker/Dockerfile | head -1 | tr -d '[:space:]')
+          echo "Dockerfile pin: $pin"
+          echo "version=$pin" >> "$GITHUB_OUTPUT"
           code=$(curl -o /dev/null -sS -w '%{http_code}' --head \
-            "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-${ver}-linux-x86_64")
+            "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-${pin}-linux-x86_64")
           echo "http_code=$code" >> "$GITHUB_OUTPUT"
           if [ "$code" = "200" ]; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "Linux grok binary not available (HTTP $code) — skipping image build"
+            echo "Pinned Linux grok ${pin} not available (HTTP $code) — skipping image build"
           fi
-      - name: Build stock grok+harness image
+      - name: Build stock grok-only image
         if: steps.probe.outputs.ok == 'true'
         run: |
           docker build -f docker/Dockerfile \
@@ -53,7 +52,15 @@ jobs:
             -t rle-grok-build:ci .
       - name: Smoke mcp list (no RimWorld, no API key)
         if: steps.probe.outputs.ok == 'true'
-        run: docker run --rm rle-grok-build:ci smoke
+        run: |
+          set -euo pipefail
+          out=$(docker run --rm rle-grok-build:ci mcp list)
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -qi rle
+          if printf '%s\n' "$out" | grep -qiE 'wandb'; then
+            echo "unexpected compatibility MCP in grok mcp list" >&2
+            exit 1
+          fi
       - name: Note skipped image build
         if: steps.probe.outputs.ok != 'true'
         run: |

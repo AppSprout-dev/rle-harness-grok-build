@@ -2,9 +2,18 @@
 
 The host Windows hang (180s, 0 tokens) is hypothesized to be environment
 pollution: desktop grok loads Claude/Cursor compat MCPs and plugins even after
-a temp GROK_HOME. The container writes a *fresh* home that contains only the
-RLE MCP stanza plus optional ``auth.json``. It never copies host
+a temp GROK_HOME. The Linux container writes a *fresh* home that contains only
+the RLE MCP stanza plus optional ``auth.json``. It never copies host
 ``~/.grok/config.toml``, ``~/.claude.json``, or the plugin zoo.
+
+Architecture (locked):
+
+* Windows RimWorld + RIMAPI stay on the **host** (``localhost:8765``).
+* Container is stock Linux grok only.
+* Grok reaches RLE's MCP at the **advertised** URL
+  ``http://host.docker.internal:8766/mcp`` (requires an RLE McpHost that
+  binds ``0.0.0.0`` on a fixed port — sibling RLE PR). Today's McpHost binds
+  ``127.0.0.1`` + ephemeral port and is unreachable from Docker.
 """
 
 from __future__ import annotations
@@ -24,10 +33,12 @@ AUTH_FILENAMES = ("auth.json", "mcp_credentials.json")
 # Preferred in-container mount for a *host-exported* auth.json (file only).
 CONTAINER_AUTH_MOUNT = Path("/auth/auth.json")
 
-DEFAULT_DOCKER_RIMAPI_URL = "http://host.docker.internal:8765"
-DEFAULT_COMPOSE_RIMWORLD_URL = "http://rimworld:8765"
-DEFAULT_SMOKE_MCP_URL = "http://127.0.0.1:9/mcp"
-DEFAULT_CONTAINER_GROK_HOME = Path("/home/rle/.grok")
+# Host Windows RimWorld (not run inside the Linux grok container).
+DEFAULT_HOST_RIMAPI_URL = "http://127.0.0.1:8765"
+DEFAULT_MCP_LISTEN_PORT = 8766
+# What grok-in-Docker must dial after the RLE McpHost bind/advertise PR.
+DEFAULT_ADVERTISED_MCP_URL = "http://host.docker.internal:8766/mcp"
+DEFAULT_CONTAINER_GROK_HOME = Path("/home/grok/.grok")
 
 # Documented host paths that must not be bind-mounted into the image.
 FORBIDDEN_HOST_BIND_SOURCES = (
@@ -63,19 +74,26 @@ def mcp_config_toml(mcp_url: str) -> str:
     )
 
 
+def effective_mcp_url(bind_url: str, advertise_url: str | None) -> str:
+    """URL written into grok config: advertised (Docker) wins over bind URL."""
+    if advertise_url:
+        return advertise_url
+    return bind_url
+
+
 def resolve_rimapi_url(
     explicit: str | None = None,
     *,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """RimAPI base URL: flag, then ``RIMAPI_URL``, then Docker Desktop default."""
+    """Host RimAPI base URL: flag, then ``RIMAPI_URL``, then localhost:8765."""
     if explicit:
         return explicit.rstrip("/")
     environ = os.environ if env is None else env
     from_env = environ.get("RIMAPI_URL")
     if from_env:
         return from_env.rstrip("/")
-    return DEFAULT_DOCKER_RIMAPI_URL
+    return DEFAULT_HOST_RIMAPI_URL
 
 
 def resolve_mcp_url(
@@ -83,14 +101,14 @@ def resolve_mcp_url(
     *,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """MCP URL written into isolated ``config.toml`` (smoke / sidecar)."""
+    """Advertised MCP URL written into isolated ``config.toml``."""
     if explicit:
         return explicit
     environ = os.environ if env is None else env
     from_env = environ.get("MCP_URL")
     if from_env:
         return from_env
-    return DEFAULT_SMOKE_MCP_URL
+    return DEFAULT_ADVERTISED_MCP_URL
 
 
 def resolve_auth_json(
@@ -108,6 +126,22 @@ def resolve_auth_json(
     if CONTAINER_AUTH_MOUNT.is_file() and CONTAINER_AUTH_MOUNT.stat().st_size > 0:
         return CONTAINER_AUTH_MOUNT
     return None
+
+
+def resolve_binary(binary: str) -> str | None:
+    """Resolve a grok executable or wrapper script (``.sh`` / ``.cmd`` / ``.ps1``)."""
+    candidate = Path(binary).expanduser()
+    if candidate.is_file():
+        return str(candidate.resolve())
+    return shutil.which(binary)
+
+
+def is_host_plugin_home(home: Path) -> bool:
+    """True when *home* is the user's real ``~/.grok`` (must not be mounted)."""
+    try:
+        return home.expanduser().resolve() == (Path.home() / ".grok").resolve()
+    except OSError:
+        return False
 
 
 def wipe_plugin_pollution(home: Path) -> list[str]:

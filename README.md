@@ -45,46 +45,58 @@ Options (`--harness-opt key=value`):
 | `turn_timeout_s` | 180 | Kill the invocation after this many seconds |
 | `extra_instructions` | – | Appended to every turn prompt |
 | `extra_args` | – | Raw flags appended to every invocation |
+| `mcp_advertise_url` | – | URL written into grok config (Docker: `http://host.docker.internal:8766/mcp`) |
 
-## Docker (stock grok, no host plugins)
+## Docker (stock Linux grok only)
 
-Host Windows grok can still load desktop plugins / Claude-Cursor compat MCPs
-even after this package isolates `GROK_HOME` (PRs #1 / #2). Manual probes with
-a clean home can call `rle__get_brief`; full Crashlanded cals on the polluted
-host have hung 180s with 0 tokens.
+**Locked architecture:** Windows RimWorld + RIMAPI stay on the **host**
+(`localhost:8765`). Do not run Windows Steam RimWorld inside the Linux
+container. The image is **official Linux `grok` only** — not this Python
+package, not RLE, not RimWorld. RLE's Linux headless RimWorld Docker
+(`AppSprout-dev/RLE/docker/`) is a separate path; third-party harness Docker
+stays here.
 
-This repo ships a **plugin-free Linux image**: official `grok` from
-[x.ai/cli](https://x.ai/cli) + this harness + RLE. Runtime `GROK_HOME` is
-empty except an RLE-only `config.toml` (`[compat.claude]` / `[compat.cursor]`
-`mcps = false`). Auth is `XAI_API_KEY` (preferred) or a mounted `auth.json`
-file. The image never copies host `~/.grok` or `~/.claude.json`.
+Host desktop grok still loads plugins / Claude-Cursor compat MCPs after the
+GROK_HOME isolation patches (PRs #1 / #2). The sidecar starts from an empty
+`GROK_HOME` and writes RLE-only `config.toml` (`compat.*.mcps = false`).
+Auth is `XAI_API_KEY` (preferred) or a mounted `auth.json` **file**. Never
+mount host `~/.grok`.
+
+### Prerequisite (RLE `McpHost` — sibling PR)
+
+Today `McpHost` binds `127.0.0.1` + an ephemeral port → **unreachable from
+Docker**. A sibling RLE PR must bind `0.0.0.0`, use a fixed port (e.g.
+**8766**), and advertise `http://host.docker.internal:8766/mcp`. This repo's
+compose and `docker/grok-docker.sh|.cmd` assume that URL and pass
+`--add-host host.docker.internal:host-gateway`.
+
+Until that lands, `grok mcp list` smoke works; live `rle__*` calls from the
+container will not connect.
+
+### Build + smoke (no RimWorld; CI-safe)
 
 ```bash
 docker build -f docker/Dockerfile -t rle-grok-build:local .
-docker run --rm rle-grok-build:local smoke          # grok mcp list → only rle
-docker run --rm -e XAI_API_KEY rle-grok-build:local \
-  smoke --call-tool                                 # MockRimAPI + grok -p (no RimWorld)
+docker run --rm rle-grok-build:local mcp list    # must list rle only
+./docker/grok-docker.sh mcp list                 # Unix wrapper
+.\docker\grok-docker.cmd mcp list                # Windows wrapper
 ```
 
-One-tick Crashlanded against RimAPI on the host (RLE docker / compose, port
-**8765**):
+Grok is pinned (`GROK_VERSION=1.0.13`). Docker Desktop may have the CLI
+while the **daemon is stopped** — start it before build/run.
 
-```bash
-export XAI_API_KEY=xai-...
-docker compose -f docker/docker-compose.yml run --rm grok-harness \
-  cal --ticks 1 --scenario crashlanded --model grok-4.6
+### Host cal (after McpHost PR)
+
+Harness + scenario loop stay on Windows. Point `binary` at the wrapper:
+
+```powershell
+$env:XAI_API_KEY = "xai-..."
+python scripts/run_scenario.py crashlanded --harness grok-build --ticks 1 `
+  --harness-opt "binary=.\docker\grok-docker.cmd" `
+  --harness-opt "mcp_advertise_url=http://host.docker.internal:8766/mcp"
 ```
 
-Compose sets `extra_hosts: host.docker.internal:host-gateway` and
-`RIMAPI_URL=http://host.docker.internal:8765`. To join RLE's existing
-`rimworld` service on the compose network, use
-`docker/docker-compose.rle-network.yml` (`RIMAPI_URL=http://rimworld:8765`).
-Operator details, auth mounts, and the "do not mount" list:
-[docker/README.md](docker/README.md).
-
-Hypothesis: the host hang is environment pollution. In this container, MCP
-connect + first tool call should complete within ~60s when RimAPI is
-reachable (`smoke --call-tool` proves the MCP hop without RimWorld).
+Details, auth mounts, and the do-not-mount list: [docker/README.md](docker/README.md).
 
 ## How it works
 
