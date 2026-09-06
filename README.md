@@ -101,6 +101,23 @@ to persist `/home/grok/.grok` without using `%TEMP%`.
 Auth stays `XAI_API_KEY` (or a mounted `auth.json` file). Do not bake
 secrets into the image.
 
+### Windows argv JSON (required for `grok-docker.cmd`)
+
+`grok-docker.cmd` launches PowerShell with `%*`. cmd.exe drops quoted and
+large `-p` prompts, so the wrapper starts grok with **no args**. The image
+entrypoint then defaults to `mcp list` and exits 0 — Crashlanded ticks
+report **0 tokens / 0 actions / success**.
+
+When `binary` is `grok-docker.cmd` / `.ps1` / `.sh`, the harness:
+
+1. Writes the grok argv (everything after the wrapper path) as UTF-8 JSON
+2. Sets `RLE_GROK_ARGV_JSON` to that temp file
+3. Invokes the wrapper with **no** grok CLI args
+
+Wrappers load that JSON array when the env var is set; otherwise they keep
+parsing the command line (manual `.\docker\grok-docker.cmd mcp list` still
+works). The JSON file is read on the **host** (not bind-mounted).
+
 ### Host cal (after McpHost PR)
 
 Harness + scenario loop stay on Windows. Point `binary` at the wrapper:

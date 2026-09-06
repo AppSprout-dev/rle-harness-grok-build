@@ -7,6 +7,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+from rle_harness_grok_build.argv_json import ARGV_JSON_ENV, write_argv_json
+
 WRAPPER = Path(__file__).resolve().parents[1] / "docker" / "grok-docker.sh"
 
 
@@ -39,6 +41,7 @@ def _run_wrapper(
         "GROK_DOCKER_HOME_VOLUME",
         "GROK_DOCKER_IMAGE",
         "MCP_URL",
+        ARGV_JSON_ENV,
     ):
         env.pop(key, None)
     env.update(extra_env)
@@ -138,3 +141,50 @@ class TestGrokDockerShHostileTemp:
         mounts = _volume_targets(proc.stdout)
         assert not any(m.endswith(":/home/grok/.grok") for m in mounts)
         assert "refusing to mount host ~/.grok" in proc.stderr
+
+
+class TestGrokDockerShArgvJson:
+    def test_loads_sidecar_and_ignores_cli_args(self, tmp_path: Path) -> None:
+        prompt = 'Crashlanded: do "the thing" ' + ("colonist " * 80)
+        sidecar = write_argv_json(
+            ["-p", prompt, "--output-format", "json", "--yolo"],
+            tmp_path / "argv.json",
+        )
+        proc = _run_wrapper(
+            tmp_path,
+            ["this-cli-should-be-ignored", "mcp", "list"],
+            {ARGV_JSON_ENV: str(sidecar)},
+        )
+        assert proc.returncode == 0, proc.stderr
+        lines = proc.stdout.splitlines()
+        assert "-p" in lines
+        assert prompt in lines
+        assert "--output-format" in lines
+        assert "json" in lines
+        assert "this-cli-should-be-ignored" not in lines
+        assert "mcp" not in lines
+
+    def test_sidecar_plus_hostile_temp_home_still_skips_mount(self, tmp_path: Path) -> None:
+        home = tmp_path / "AppData" / "Local" / "Temp" / "rle-grok-home-json"
+        home.mkdir(parents=True)
+        sidecar = write_argv_json(["mcp", "list"], tmp_path / "health.json")
+        proc = _run_wrapper(
+            tmp_path,
+            [],
+            {ARGV_JSON_ENV: str(sidecar), "GROK_HOME": str(home)},
+        )
+        assert proc.returncode == 0, proc.stderr
+        mounts = _volume_targets(proc.stdout)
+        assert not any(m.endswith(":/home/grok/.grok") for m in mounts)
+        assert "hostile temp GROK_HOME" in proc.stderr
+        lines = proc.stdout.splitlines()
+        assert "mcp" in lines and "list" in lines
+
+    def test_missing_sidecar_file_fails(self, tmp_path: Path) -> None:
+        proc = _run_wrapper(
+            tmp_path,
+            ["mcp", "list"],
+            {ARGV_JSON_ENV: str(tmp_path / "missing.json")},
+        )
+        assert proc.returncode != 0
+        assert "file not found" in proc.stderr

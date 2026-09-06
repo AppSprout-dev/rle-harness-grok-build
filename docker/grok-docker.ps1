@@ -10,6 +10,37 @@ $ErrorActionPreference = "Stop"
 $Image = if ($env:GROK_DOCKER_IMAGE) { $env:GROK_DOCKER_IMAGE } else { "rle-grok-build:local" }
 $McpUrl = if ($env:MCP_URL) { $env:MCP_URL } else { "http://host.docker.internal:8766/mcp" }
 
+# Windows cmd.exe %* drops quoted/large -p prompts. The harness writes argv
+# (after the wrapper path) as UTF-8 JSON and sets RLE_GROK_ARGV_JSON.
+if (-not [string]::IsNullOrWhiteSpace($env:RLE_GROK_ARGV_JSON)) {
+    if (-not (Test-Path -LiteralPath $env:RLE_GROK_ARGV_JSON)) {
+        Write-Error "RLE_GROK_ARGV_JSON is set but file not found: $($env:RLE_GROK_ARGV_JSON)"
+        exit 1
+    }
+    $raw = [System.IO.File]::ReadAllText(
+        $env:RLE_GROK_ARGV_JSON,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    if (-not $raw.Trim().StartsWith("[")) {
+        Write-Error "RLE_GROK_ARGV_JSON must be a JSON array of strings"
+        exit 1
+    }
+    $parsed = ConvertFrom-Json -InputObject $raw
+    if ($null -eq $parsed) {
+        $GrokArgs = [string[]]@()
+    }
+    else {
+        $asArray = @($parsed)
+        foreach ($item in $asArray) {
+            if ($item -isnot [string]) {
+                Write-Error "RLE_GROK_ARGV_JSON must be a JSON array of strings"
+                exit 1
+            }
+        }
+        $GrokArgs = [string[]]$asArray
+    }
+}
+
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Write-Error "docker CLI not found. Install Docker Desktop and retry."
     exit 127
