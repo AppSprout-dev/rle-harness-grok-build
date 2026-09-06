@@ -49,6 +49,8 @@ class TestInvocationShaping:
     def test_mcp_config(self) -> None:
         toml = mcp_config_toml("http://127.0.0.1:7000/mcp")
         assert "[mcp_servers.rle]" in toml and 'url = "http://127.0.0.1:7000/mcp"' in toml
+        assert "[compat.claude]" in toml and "mcps = false" in toml
+        assert "[compat.cursor]" in toml
 
     def test_build_command_first_tick(self) -> None:
         cmd = build_command(
@@ -110,6 +112,9 @@ def _fake_grok(tmp_path: Path) -> Path:
         "import json, sys, os\n"
         f"open({str(tmp_path / 'argv.json')!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
         "assert os.path.exists(os.path.join(os.getcwd(), '.grok', 'config.toml'))\n"
+        "if sys.argv[1:3] == ['mcp', 'list']:\n"
+        "    print('rle')\n"
+        "    sys.exit(0)\n"
         "print(json.dumps({'text': 'ok', 'sessionId': 'sess-9', "
         "'usage': {'input_tokens': 5, 'output_tokens': 1}}))\n",
     )
