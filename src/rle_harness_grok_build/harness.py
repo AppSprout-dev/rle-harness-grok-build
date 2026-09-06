@@ -37,6 +37,7 @@ from typing import Any, ClassVar
 from rle.harness import HarnessStepError
 from rle.harness.cli_base import HeadlessCliHarness, TurnResult
 
+from rle_harness_grok_build.argv_json import prepare_docker_wrapper_invocation
 from rle_harness_grok_build.isolated_home import (
     AUTH_FILENAMES,
     check_mcp_list_output,
@@ -171,17 +172,22 @@ class GrokBuildHarness(HeadlessCliHarness):
     async def _healthcheck_mcp(self) -> None:
         """Verify the isolated config exposes only the RLE MCP server."""
         assert self._binary is not None and self._workdir is not None
-        proc = await asyncio.create_subprocess_exec(
-            self._binary, "mcp", "list", cwd=self._workdir,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=self._subprocess_env(),
-        )
+        invoke, env, sidecar = self._prepare_exec([self._binary, "mcp", "list"])
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=20)
-        except asyncio.TimeoutError as exc:
-            proc.kill()
-            await proc.wait()
-            raise HarnessStepError("grok MCP healthcheck timed out after 20s") from exc
+            proc = await asyncio.create_subprocess_exec(
+                *invoke, cwd=self._workdir,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=20)
+            except asyncio.TimeoutError as exc:
+                proc.kill()
+                await proc.wait()
+                raise HarnessStepError("grok MCP healthcheck timed out after 20s") from exc
+        finally:
+            if sidecar is not None:
+                sidecar.unlink(missing_ok=True)
         output = (stdout_b + stderr_b).decode("utf-8", errors="replace")
         if proc.returncode != 0:
             raise HarnessStepError(
@@ -232,6 +238,12 @@ class GrokBuildHarness(HeadlessCliHarness):
             env["MCP_URL"] = self._mcp_url
         return env
 
+    def _prepare_exec(self, cmd: list[str]) -> tuple[list[str], dict[str, str], Path | None]:
+        """Build subprocess argv/env; grok-docker wrappers get an argv JSON sidecar."""
+        env = self._subprocess_env()
+        invoke, sidecar = prepare_docker_wrapper_invocation(cmd, env)
+        return invoke, env, sidecar
+
     async def send_turn(self, prompt: str) -> TurnResult:
         assert self._binary is not None and self._workdir is not None
         cmd = build_command(
@@ -240,22 +252,27 @@ class GrokBuildHarness(HeadlessCliHarness):
             workdir=self._workdir, session_id=self._session_id,
         )
         logger.debug("grok invocation: %s", " ".join(cmd[:1] + ["-p", "<prompt>"] + cmd[3:]))
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=self._workdir,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=self._subprocess_env(),
-        )
-        self._proc = proc
+        invoke, env, sidecar = self._prepare_exec(cmd)
         try:
-            stdout_b, stderr_b = await proc.communicate()
-        except asyncio.CancelledError:
-            # communicate() owns the pipe readers; do not call it a second time
-            # from abort_turn after cancellation.
-            await self._terminate_process(proc)
-            raise
+            proc = await asyncio.create_subprocess_exec(
+                *invoke, cwd=self._workdir,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            self._proc = proc
+            try:
+                stdout_b, stderr_b = await proc.communicate()
+            except asyncio.CancelledError:
+                # communicate() owns the pipe readers; do not call it a second time
+                # from abort_turn after cancellation.
+                await self._terminate_process(proc)
+                raise
+            finally:
+                if self._proc is proc:
+                    self._proc = None
         finally:
-            if self._proc is proc:
-                self._proc = None
+            if sidecar is not None:
+                sidecar.unlink(missing_ok=True)
         returncode = proc.returncode or 0
         stdout = stdout_b.decode("utf-8", errors="replace")
         stderr = stderr_b.decode("utf-8", errors="replace")

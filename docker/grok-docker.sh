@@ -39,10 +39,49 @@ warn_skip_temp_mount() {
   echo "warning: skipping Docker bind-mount of hostile temp ${role} '${mount_path}'. Docker Desktop on Windows returns exit 125 Access is denied for %TEMP% / AppData\\Local\\Temp mounts. Relying on MCP_URL env and an empty container GROK_HOME (entrypoint writes config). Session resume across --rm ticks needs a non-Temp volume (set GROK_DOCKER_HOME_VOLUME)." >&2
 }
 
+# Windows cmd.exe %* drops quoted/large -p prompts. The harness writes argv
+# (after the wrapper path) as UTF-8 JSON and sets RLE_GROK_ARGV_JSON.
+grok_args=()
+if [[ -n "${RLE_GROK_ARGV_JSON:-}" ]]; then
+  if [[ ! -f "${RLE_GROK_ARGV_JSON}" ]]; then
+    echo "RLE_GROK_ARGV_JSON is set but file not found: ${RLE_GROK_ARGV_JSON}" >&2
+    exit 1
+  fi
+  py=""
+  if command -v python3 >/dev/null 2>&1; then
+    py=python3
+  elif command -v python >/dev/null 2>&1; then
+    py=python
+  else
+    echo "RLE_GROK_ARGV_JSON is set but python3 (or python) is required to load it." >&2
+    exit 1
+  fi
+  "$py" -c '
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+if not isinstance(data, list) or not all(isinstance(x, str) for x in data):
+    sys.stderr.write("RLE_GROK_ARGV_JSON must be a JSON array of strings\n")
+    sys.exit(1)
+' "${RLE_GROK_ARGV_JSON}"
+  mapfile -d '' grok_args < <("$py" -c '
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+sys.stdout.buffer.write(b"\0".join(s.encode("utf-8") for s in data))
+if data:
+    sys.stdout.buffer.write(b"\0")
+' "${RLE_GROK_ARGV_JSON}")
+  if ((${#grok_args[@]})) && [[ -z "${grok_args[-1]}" ]]; then
+    unset 'grok_args[-1]'
+  fi
+else
+  grok_args=("$@")
+fi
+
 cwd_host=""
 out=()
 prev=""
-for a in "$@"; do
+for a in "${grok_args[@]}"; do
   if [[ "$prev" == "--cwd" ]]; then
     cwd_host="$a"
     out+=("/work")

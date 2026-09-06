@@ -10,6 +10,37 @@ $ErrorActionPreference = "Stop"
 $Image = if ($env:GROK_DOCKER_IMAGE) { $env:GROK_DOCKER_IMAGE } else { "rle-grok-build:local" }
 $McpUrl = if ($env:MCP_URL) { $env:MCP_URL } else { "http://host.docker.internal:8766/mcp" }
 
+# Windows cmd.exe %* drops quoted/large -p prompts. The harness writes argv
+# (after the wrapper path) as UTF-8 JSON and sets RLE_GROK_ARGV_JSON.
+if (-not [string]::IsNullOrWhiteSpace($env:RLE_GROK_ARGV_JSON)) {
+    if (-not (Test-Path -LiteralPath $env:RLE_GROK_ARGV_JSON)) {
+        Write-Error "RLE_GROK_ARGV_JSON is set but file not found: $($env:RLE_GROK_ARGV_JSON)"
+        exit 1
+    }
+    $raw = [System.IO.File]::ReadAllText(
+        $env:RLE_GROK_ARGV_JSON,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    if (-not $raw.Trim().StartsWith("[")) {
+        Write-Error "RLE_GROK_ARGV_JSON must be a JSON array of strings"
+        exit 1
+    }
+    $parsed = ConvertFrom-Json -InputObject $raw
+    if ($null -eq $parsed) {
+        $GrokArgs = [string[]]@()
+    }
+    else {
+        $asArray = @($parsed)
+        foreach ($item in $asArray) {
+            if ($item -isnot [string]) {
+                Write-Error "RLE_GROK_ARGV_JSON must be a JSON array of strings"
+                exit 1
+            }
+        }
+        $GrokArgs = [string[]]$asArray
+    }
+}
+
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Write-Error "docker CLI not found. Install Docker Desktop and retry."
     exit 127
@@ -118,5 +149,41 @@ if ($cwdHost -and (Test-Path -LiteralPath $cwdHost -PathType Container)) {
 }
 
 $dockerArgs += @($Image) + $out
+
+# Optional host-side argv trace. One element per line (never a joined command
+# line). Do not feed this log back into Start-Process / cmd — that re-splits
+# Unicode (em dash in "RLE turn — tick 0...") into extra arguments.
+if ($env:RLE_GROK_DOCKER_TRACE) {
+    $redacted = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $dockerArgs.Count; $i++) {
+        $a = $dockerArgs[$i]
+        if ($i -gt 0 -and $dockerArgs[$i - 1] -eq "-p") {
+            [void]$redacted.Add("<prompt $($a.Length) chars>")
+        }
+        elseif ($a -like "XAI_API_KEY=*") {
+            [void]$redacted.Add("XAI_API_KEY=<redacted>")
+        }
+        else {
+            [void]$redacted.Add($a)
+        }
+    }
+    $payload = [string]::Join("`n", $redacted.ToArray())
+    $traceDest = $env:RLE_GROK_DOCKER_TRACE
+    if ($traceDest -eq "1" -or $traceDest -eq "true") {
+        Write-Warning $payload
+    }
+    else {
+        [System.IO.File]::WriteAllText(
+            $traceDest,
+            $payload + "`n",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+    }
+}
+
+# INVOKE: PowerShell splat only. Do NOT use Start-Process -ArgumentList.
+# Start-Process re-joins the array into one Windows command line; the CRT
+# re-splits it. Live prove: Unicode em dash in "RLE turn — tick 0..." became
+# a new argument (`error: unexpected argument '—' found`).
 & docker @dockerArgs
 exit $LASTEXITCODE

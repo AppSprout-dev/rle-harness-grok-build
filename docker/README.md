@@ -103,6 +103,9 @@ Wrappers:
   container `GROK_HOME` (entrypoint writes config)
 * optional `GROK_DOCKER_HOME_VOLUME` named volume for session persist across `--rm`
 * forward `XAI_API_KEY` / `GROK_AUTH_JSON`
+* load grok argv from `RLE_GROK_ARGV_JSON` (UTF-8 JSON array) when the harness
+  sets it — required on Windows because `grok-docker.cmd` → `powershell -File
+  … %*` drops quoted / large `-p` prompts
 
 ## Windows / Docker Desktop caveats
 
@@ -122,6 +125,25 @@ $env:GROK_DOCKER_HOME_VOLUME = "rle-grok-home"
 ```
 
 Do not bake secrets. Do not mount host `~/.grok`.
+
+## Windows argv JSON (`RLE_GROK_ARGV_JSON`)
+
+`cmd.exe` `%*` cannot carry a Crashlanded `-p` prompt through
+`grok-docker.cmd` into PowerShell. The proven failure mode is a docker
+invocation with **no grok args** (entrypoint `mcp list`, exit 0) and a
+tick that records 0 tokens / 0 actions / success.
+
+The harness detects wrapper basenames `grok-docker.cmd` / `.ps1` / `.sh`,
+writes argv after the binary as UTF-8 JSON, sets `RLE_GROK_ARGV_JSON`, and
+invokes the wrapper with no CLI grok args. Wrappers load that file when
+present; CLI parsing remains for manual smoke (`mcp list`). The sidecar
+file is host-local — it is not bind-mounted into the container.
+
+`grok-docker.ps1` invokes docker with `& docker @dockerArgs` only. Do not
+use `Start-Process -ArgumentList`: it re-joins argv and Windows re-splits
+the Crashlanded prompt (Unicode em dash `—` became `unexpected argument`).
+Optional `RLE_GROK_DOCKER_TRACE=1` or a file path logs one redacted argv
+element per line and does not change the invoke.
 
 ## What is deliberately NOT mounted
 

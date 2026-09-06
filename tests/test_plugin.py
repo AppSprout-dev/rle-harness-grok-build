@@ -18,6 +18,7 @@ from rle.harness import (
 from rle.rimapi.client import RimAPIClient
 from rle.testing import MockRimAPI, run_harness_smoke
 
+from rle_harness_grok_build.argv_json import ARGV_JSON_ENV
 from rle_harness_grok_build.harness import (
     GrokBuildHarness,
     build_command,
@@ -200,3 +201,58 @@ class TestAgainstFakeBinary:
                     await harness.send_turn("x")
             finally:
                 await harness.stop_agent()
+
+    async def test_docker_wrapper_send_writes_argv_json(self, tmp_path: Path) -> None:
+        fake = _fake_grok_docker_wrapper(tmp_path)
+        huge = 'RLE turn — tick 0: colonist "Lee" needs a bed\n' + ("priority " * 200)
+        harness = GrokBuildHarness(GrokBuildOptions(binary=str(fake), model="grok-4.6"))
+        mock = MockRimAPI()
+        async with RimAPIClient("http://mock") as client:
+            mock.attach(client)
+            harness._ctx = HarnessContext(config=RLEConfig(tick_interval=0.0), client=client)
+            await harness.start_agent("http://127.0.0.1:1/mcp")
+            try:
+                turn = await harness.send_turn(huge)
+            finally:
+                await harness.stop_agent()
+        assert turn.text == "ok"
+        records = [
+            json.loads(line) for line in (tmp_path / "wrapper.json").read_text().splitlines()
+        ]
+        assert len(records) == 2
+        health, tick = records
+        assert health["cli"] == []
+        assert health["json"] == ["mcp", "list"]
+        assert health["sidecar"]
+        assert tick["cli"] == []
+        assert tick["json"][0] == "-p"
+        assert tick["json"][1] == huge
+        assert "--output-format" in tick["json"]
+        sidecar_path = Path(tick["sidecar"])
+        assert not sidecar_path.exists()
+
+
+def _fake_grok_docker_wrapper(tmp_path: Path) -> Path:
+    """Wrapper-named stand-in that reads RLE_GROK_ARGV_JSON and records both argv sources."""
+    script = tmp_path / "grok-docker.sh"
+    record = tmp_path / "wrapper.json"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"record = {str(record)!r}\n"
+        f"env_name = {ARGV_JSON_ENV!r}\n"
+        "sidecar = os.environ.get(env_name)\n"
+        "loaded = json.load(open(sidecar, encoding='utf-8')) if sidecar else None\n"
+        "open(record, 'a').write(json.dumps({\n"
+        "    'cli': sys.argv[1:], 'json': loaded, 'sidecar': sidecar,\n"
+        "}) + '\\n')\n"
+        "args = loaded if loaded is not None else sys.argv[1:]\n"
+        "if args[:2] == ['mcp', 'list']:\n"
+        "    print('rle')\n"
+        "    raise SystemExit(0)\n"
+        "print(json.dumps({'text': 'ok', 'sessionId': 'sess-9', "
+        "'usage': {'input_tokens': 5, 'output_tokens': 1}}))\n",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return script
