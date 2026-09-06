@@ -15,6 +15,7 @@ from rle_harness_grok_build.isolated_home import (
     check_mcp_list_output,
     effective_mcp_url,
     is_host_plugin_home,
+    is_hostile_temp_bind_source,
     mcp_config_toml,
     prepare_runtime_grok_home,
     resolve_auth_json,
@@ -83,6 +84,32 @@ class TestAuthAndForbiddenMounts:
     def test_is_host_plugin_home(self, tmp_path: Path) -> None:
         assert is_host_plugin_home(Path.home() / ".grok")
         assert not is_host_plugin_home(tmp_path / "rle-grok-home-xyz")
+
+
+class TestHostileTempBindSource:
+    def test_windows_appdata_temp_and_rle_prefixes(self) -> None:
+        assert is_hostile_temp_bind_source(
+            r"C:\Users\me\AppData\Local\Temp\rle-grok-home-abc",
+        )
+        assert is_hostile_temp_bind_source(
+            "C:/Users/me/AppData/Local/Temp/rle-grok-xyz",
+        )
+        assert is_hostile_temp_bind_source(
+            "/mnt/c/Users/me/AppData/Local/Temp/rle-grok-home-1",
+        )
+        assert is_hostile_temp_bind_source(r"D:\Scratch\Temp\rle-grok-home-2")
+        assert is_hostile_temp_bind_source(r"C:\Windows\Temp\rle-grok-cwd")
+
+    def test_unix_tmp_is_not_hostile(self, tmp_path: Path) -> None:
+        assert not is_hostile_temp_bind_source("/tmp/rle-grok-home-abc")
+        assert not is_hostile_temp_bind_source(tmp_path / "rle-grok-home-xyz")
+        assert not is_hostile_temp_bind_source("/home/me/.grok")
+
+    def test_windows_temp_env_prefix_only(self) -> None:
+        env = {"TEMP": r"D:\Scratch", "TMP": r"D:\Scratch"}
+        assert is_hostile_temp_bind_source(r"D:\Scratch\rle-grok-home-1", env=env)
+        assert not is_hostile_temp_bind_source("/tmp/rle-grok-home-1", env={"TMPDIR": "/tmp"})
+        assert not is_hostile_temp_bind_source("/tmp/foo", env={"TEMP": "/tmp"})
 
 
 class TestResolveBinary:

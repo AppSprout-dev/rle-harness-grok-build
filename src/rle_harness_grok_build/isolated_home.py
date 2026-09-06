@@ -49,6 +49,11 @@ FORBIDDEN_HOST_BIND_SOURCES = (
     "~/.cursor",
 )
 
+# Docker Desktop on Windows returns exit 125 "Access is denied" for these.
+# Wrappers skip the bind-mount and rely on MCP_URL + empty container GROK_HOME.
+_WIN_APPDATA_TEMP = "/appdata/local/temp"
+_WIN_TEMP_RLE_GROK = re.compile(r"/temp/rle-grok")
+
 _POLLUTION_NAMES = (
     "plugins",
     "skills",
@@ -142,6 +147,54 @@ def is_host_plugin_home(home: Path) -> bool:
         return home.expanduser().resolve() == (Path.home() / ".grok").resolve()
     except OSError:
         return False
+
+
+def _normalize_bind_path(path: Path | str) -> str:
+    return os.fspath(path).replace("\\", "/").lower()
+
+
+def _is_windows_temp_root(normalized: str) -> bool:
+    """True for a Windows ``%TEMP%`` / ``%TMP%`` root (not Unix ``/tmp``)."""
+    if _WIN_APPDATA_TEMP in normalized:
+        return True
+    # Drive-letter or UNC roots (``D:/Scratch``, ``//server/temp``).
+    if re.match(r"^[a-z]:/", normalized):
+        return True
+    return normalized.startswith("//")
+
+
+def is_hostile_temp_bind_source(
+    path: Path | str,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    """True when Docker Desktop on Windows would refuse this bind-mount.
+
+    Matches harness temp dirs under ``AppData\\Local\\Temp`` and
+    ``Temp\\rle-grok*`` (``GROK_HOME`` prefix ``rle-grok-home-``, ``--cwd``
+    prefix ``rle-grok-``). Unix ``/tmp/rle-grok*`` is **not** hostile.
+
+    Optional ``TEMP`` / ``TMP`` env roots are consulted only when they look
+    like Windows temp (PowerShell ``%TEMP%``), never generic Unix ``TMPDIR``.
+    """
+    normalized = _normalize_bind_path(path)
+    if not normalized:
+        return False
+    if _WIN_APPDATA_TEMP in normalized:
+        return True
+    if _WIN_TEMP_RLE_GROK.search(normalized):
+        return True
+    environ = {} if env is None else env
+    for key in ("TEMP", "TMP"):
+        root = environ.get(key, "")
+        if not root:
+            continue
+        root_n = _normalize_bind_path(root).rstrip("/")
+        if not root_n or not _is_windows_temp_root(root_n):
+            continue
+        if normalized == root_n or normalized.startswith(root_n + "/"):
+            return True
+    return False
 
 
 def wipe_plugin_pollution(home: Path) -> list[str]:

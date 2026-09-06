@@ -39,6 +39,39 @@ for ($i = 0; $i -lt $GrokArgs.Count; $i++) {
     [void]$out.Add($a)
 }
 
+function Test-HostileTempBindSource {
+    param([string]$Candidate)
+    if ([string]::IsNullOrWhiteSpace($Candidate)) {
+        return $false
+    }
+    $normalized = $Candidate.Replace('/', '\').ToLowerInvariant()
+    if ($normalized -match '\\appdata\\local\\temp(\\|$)') {
+        return $true
+    }
+    # Harness prefixes: rle-grok-home-* (GROK_HOME) and rle-grok-* (--cwd).
+    if ($normalized -match '\\temp\\rle-grok') {
+        return $true
+    }
+    foreach ($root in @($env:TEMP, $env:TMP)) {
+        if ([string]::IsNullOrWhiteSpace($root)) {
+            continue
+        }
+        $rootNorm = $root.Replace('/', '\').TrimEnd('\').ToLowerInvariant()
+        if ($normalized -eq $rootNorm -or $normalized.StartsWith($rootNorm + '\')) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Write-SkipTempMount {
+    param([string]$Role, [string]$MountPath)
+    Write-Warning ("skipping Docker bind-mount of hostile temp ${Role} '${MountPath}'. " +
+        "Docker Desktop on Windows returns exit 125 Access is denied for %TEMP% / AppData\Local\Temp mounts. " +
+        "Relying on MCP_URL env and an empty container GROK_HOME (entrypoint writes config). " +
+        "Session resume across --rm ticks needs a non-Temp volume (set GROK_DOCKER_HOME_VOLUME).")
+}
+
 $dockerArgs = @(
     "run", "--rm",
     "--add-host=host.docker.internal:host-gateway",
@@ -52,7 +85,11 @@ if ($env:GROK_AUTH_JSON -and (Test-Path -LiteralPath $env:GROK_AUTH_JSON) -and (
     $dockerArgs += @("-v", "$($env:GROK_AUTH_JSON):/auth/auth.json:ro")
 }
 
-if ($env:GROK_HOME -and (Test-Path -LiteralPath $env:GROK_HOME -PathType Container)) {
+# Named volume persists /home/grok/.grok across --rm ticks without %TEMP%.
+if ($env:GROK_DOCKER_HOME_VOLUME) {
+    $dockerArgs += @("-v", "$($env:GROK_DOCKER_HOME_VOLUME):/home/grok/.grok")
+}
+elseif ($env:GROK_HOME -and (Test-Path -LiteralPath $env:GROK_HOME -PathType Container)) {
     $resolvedHome = (Resolve-Path -LiteralPath $env:GROK_HOME).Path
     $hostDefault = Join-Path $HOME ".grok"
     $resolvedDefault = $null
@@ -62,6 +99,9 @@ if ($env:GROK_HOME -and (Test-Path -LiteralPath $env:GROK_HOME -PathType Contain
     if ($resolvedDefault -and ($resolvedHome -eq $resolvedDefault)) {
         Write-Warning "refusing to mount host ~/.grok (plugin zoo). Using empty container home."
     }
+    elseif (Test-HostileTempBindSource $resolvedHome) {
+        Write-SkipTempMount -Role "GROK_HOME" -MountPath $resolvedHome
+    }
     else {
         $dockerArgs += @("-v", "${resolvedHome}:/home/grok/.grok")
     }
@@ -69,7 +109,12 @@ if ($env:GROK_HOME -and (Test-Path -LiteralPath $env:GROK_HOME -PathType Contain
 
 if ($cwdHost -and (Test-Path -LiteralPath $cwdHost -PathType Container)) {
     $resolvedCwd = (Resolve-Path -LiteralPath $cwdHost).Path
-    $dockerArgs += @("-v", "${resolvedCwd}:/work")
+    if (Test-HostileTempBindSource $resolvedCwd) {
+        Write-SkipTempMount -Role "--cwd" -MountPath $resolvedCwd
+    }
+    else {
+        $dockerArgs += @("-v", "${resolvedCwd}:/work")
+    }
 }
 
 $dockerArgs += @($Image) + $out
