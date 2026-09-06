@@ -118,6 +118,14 @@ Wrappers load that JSON array when the env var is set; otherwise they keep
 parsing the command line (manual `.\docker\grok-docker.cmd mcp list` still
 works). The JSON file is read on the **host** (not bind-mounted).
 
+`grok-docker.ps1` must invoke docker with **PowerShell splatting**
+(`& docker @dockerArgs`). Do **not** use `Start-Process -ArgumentList`: it
+re-joins argv into one Windows command line and the CRT re-splits it.
+Live prove: the Unicode em dash in `RLE turn — tick 0...` became a new
+argument (`error: unexpected argument '—' found`). Optional
+`RLE_GROK_DOCKER_TRACE=1` (or a file path) logs one argv element per line
+with `-p` redacted — it does not change the docker invoke.
+
 ### Host cal (after McpHost PR)
 
 Harness + scenario loop stay on Windows. Point `binary` at the wrapper:

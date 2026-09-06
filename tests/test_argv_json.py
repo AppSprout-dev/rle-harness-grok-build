@@ -32,7 +32,7 @@ class TestIsDockerWrapperBinary:
 
 class TestArgvJsonRoundTrip:
     def test_write_load_preserves_quoted_and_huge_prompt(self, tmp_path: Path) -> None:
-        prompt = 'Crashlanded: do "the thing"\n' + ("colonist " * 400)
+        prompt = 'RLE turn — tick 0: do "the thing"\n' + ("colonist " * 400)
         args = ["-p", prompt, "--output-format", "json", "--cwd", r"C:\Temp\rle-grok-abc"]
         dest = tmp_path / "argv.json"
         path = write_argv_json(args, dest)

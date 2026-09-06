@@ -204,7 +204,7 @@ class TestAgainstFakeBinary:
 
     async def test_docker_wrapper_send_writes_argv_json(self, tmp_path: Path) -> None:
         fake = _fake_grok_docker_wrapper(tmp_path)
-        huge = 'Crashlanded brief: colonist "Lee" needs a bed\n' + ("priority " * 200)
+        huge = 'RLE turn — tick 0: colonist "Lee" needs a bed\n' + ("priority " * 200)
         harness = GrokBuildHarness(GrokBuildOptions(binary=str(fake), model="grok-4.6"))
         mock = MockRimAPI()
         async with RimAPIClient("http://mock") as client:

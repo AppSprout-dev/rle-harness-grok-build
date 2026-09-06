@@ -139,6 +139,12 @@ invokes the wrapper with no CLI grok args. Wrappers load that file when
 present; CLI parsing remains for manual smoke (`mcp list`). The sidecar
 file is host-local — it is not bind-mounted into the container.
 
+`grok-docker.ps1` invokes docker with `& docker @dockerArgs` only. Do not
+use `Start-Process -ArgumentList`: it re-joins argv and Windows re-splits
+the Crashlanded prompt (Unicode em dash `—` became `unexpected argument`).
+Optional `RLE_GROK_DOCKER_TRACE=1` or a file path logs one redacted argv
+element per line and does not change the invoke.
+
 ## What is deliberately NOT mounted
 
 | Host path | Why |

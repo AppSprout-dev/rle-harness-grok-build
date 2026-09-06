@@ -10,6 +10,7 @@ from pathlib import Path
 from rle_harness_grok_build.argv_json import ARGV_JSON_ENV, write_argv_json
 
 WRAPPER = Path(__file__).resolve().parents[1] / "docker" / "grok-docker.sh"
+PS1_WRAPPER = Path(__file__).resolve().parents[1] / "docker" / "grok-docker.ps1"
 
 
 def _fake_docker_bin(tmp_path: Path) -> Path:
@@ -145,7 +146,7 @@ class TestGrokDockerShHostileTemp:
 
 class TestGrokDockerShArgvJson:
     def test_loads_sidecar_and_ignores_cli_args(self, tmp_path: Path) -> None:
-        prompt = 'Crashlanded: do "the thing" ' + ("colonist " * 80)
+        prompt = 'RLE turn — tick 0: do "the thing" ' + ("colonist " * 80)
         sidecar = write_argv_json(
             ["-p", prompt, "--output-format", "json", "--yolo"],
             tmp_path / "argv.json",
@@ -188,3 +189,16 @@ class TestGrokDockerShArgvJson:
         )
         assert proc.returncode != 0
         assert "file not found" in proc.stderr
+
+
+class TestGrokDockerPs1Invoke:
+    def test_uses_splat_not_start_process(self) -> None:
+        text = PS1_WRAPPER.read_text(encoding="utf-8")
+        assert "& docker @dockerArgs" in text
+        assert "RLE_GROK_DOCKER_TRACE" in text
+        invoke_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if not line.lstrip().startswith("#") and "Start-Process" in line
+        ]
+        assert invoke_lines == []
