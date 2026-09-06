@@ -46,6 +46,46 @@ Options (`--harness-opt key=value`):
 | `extra_instructions` | – | Appended to every turn prompt |
 | `extra_args` | – | Raw flags appended to every invocation |
 
+## Docker (stock grok, no host plugins)
+
+Host Windows grok can still load desktop plugins / Claude-Cursor compat MCPs
+even after this package isolates `GROK_HOME` (PRs #1 / #2). Manual probes with
+a clean home can call `rle__get_brief`; full Crashlanded cals on the polluted
+host have hung 180s with 0 tokens.
+
+This repo ships a **plugin-free Linux image**: official `grok` from
+[x.ai/cli](https://x.ai/cli) + this harness + RLE. Runtime `GROK_HOME` is
+empty except an RLE-only `config.toml` (`[compat.claude]` / `[compat.cursor]`
+`mcps = false`). Auth is `XAI_API_KEY` (preferred) or a mounted `auth.json`
+file. The image never copies host `~/.grok` or `~/.claude.json`.
+
+```bash
+docker build -f docker/Dockerfile -t rle-grok-build:local .
+docker run --rm rle-grok-build:local smoke          # grok mcp list → only rle
+docker run --rm -e XAI_API_KEY rle-grok-build:local \
+  smoke --call-tool                                 # MockRimAPI + grok -p (no RimWorld)
+```
+
+One-tick Crashlanded against RimAPI on the host (RLE docker / compose, port
+**8765**):
+
+```bash
+export XAI_API_KEY=xai-...
+docker compose -f docker/docker-compose.yml run --rm grok-harness \
+  cal --ticks 1 --scenario crashlanded --model grok-4.6
+```
+
+Compose sets `extra_hosts: host.docker.internal:host-gateway` and
+`RIMAPI_URL=http://host.docker.internal:8765`. To join RLE's existing
+`rimworld` service on the compose network, use
+`docker/docker-compose.rle-network.yml` (`RIMAPI_URL=http://rimworld:8765`).
+Operator details, auth mounts, and the "do not mount" list:
+[docker/README.md](docker/README.md).
+
+Hypothesis: the host hang is environment pollution. In this container, MCP
+connect + first tool call should complete within ~60s when RimAPI is
+reachable (`smoke --call-tool` proves the MCP hop without RimWorld).
+
 ## How it works
 
 - A temp working directory with `.grok/config.toml` declaring the RLE MCP server

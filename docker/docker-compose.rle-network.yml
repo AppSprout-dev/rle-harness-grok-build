@@ -1,0 +1,30 @@
+# Overlay: attach the harness to RLE's headless RimWorld compose network.
+#
+# RLE's service is named `rimworld` and serves RimAPI on 8765
+# (https://github.com/AppSprout-dev/RLE/tree/master/docker).
+# After `docker compose up` in that tree, inspect the network name:
+#
+#   docker network ls | grep -E 'rimworld|rle|docker'
+#
+# Then:
+#
+#   export RLE_COMPOSE_NETWORK=docker_default   # typical when compose dir is docker/
+#   export XAI_API_KEY=xai-...
+#   docker compose -f docker/docker-compose.yml \
+#     -f docker/docker-compose.rle-network.yml \
+#     run --rm grok-harness cal --ticks 1
+#
+# Alternatively add this repo's grok-harness service to RLE's compose file
+# on the same default network and set RIMAPI_URL=http://rimworld:8765.
+
+services:
+  grok-harness:
+    environment:
+      RIMAPI_URL: ${RIMAPI_URL:-http://rimworld:8765}
+    networks:
+      - rle
+
+networks:
+  rle:
+    external: true
+    name: ${RLE_COMPOSE_NETWORK:-docker_default}

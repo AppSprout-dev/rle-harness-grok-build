@@ -28,7 +28,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -38,36 +37,35 @@ from typing import Any, ClassVar
 from rle.harness import HarnessStepError
 from rle.harness.cli_base import HeadlessCliHarness, TurnResult
 
+from rle_harness_grok_build.isolated_home import (
+    AUTH_FILENAMES,
+    check_mcp_list_output,
+    mcp_config_toml,
+    write_project_grok_config,
+)
 from rle_harness_grok_build.options import GrokBuildOptions
 
 logger = logging.getLogger(__name__)
 
-MCP_SERVER_NAME = "rle"
+# Re-exported for callers/tests that imported these from harness.
+__all__ = (
+    "AUTH_FILENAMES",
+    "GrokBuildHarness",
+    "TOOL_NAMING_NOTE",
+    "binary_version",
+    "build_command",
+    "mcp_config_toml",
+    "parse_json_output",
+)
 
 # Auth files to copy from the real ~/.grok into the isolated GROK_HOME.
-_AUTH_FILENAMES = ("auth.json", "mcp_credentials.json")
+_AUTH_FILENAMES = AUTH_FILENAMES
 
 TOOL_NAMING_NOTE = (
     "In this environment the RLE tools are namespaced by server: call rle__get_brief, "
     "rle__work_priority, rle__blueprint, ..., and finish with rle__end_turn. "
     "The only MCP server available is rle --- do not search for other tools."
 )
-
-
-def mcp_config_toml(mcp_url: str) -> str:
-    """RLE-only MCP config with compatibility MCP imports disabled."""
-    return (
-        f"[mcp_servers.{MCP_SERVER_NAME}]\n"
-        f'url = "{mcp_url}"\n'
-        f"startup_timeout_sec = 30\n"
-        f'headers = {{ "x-mcp-session-id" = "{{{{session_id}}}}" }}\n'
-        "\n"
-        "[compat.claude]\n"
-        "mcps = false\n"
-        "\n"
-        "[compat.cursor]\n"
-        "mcps = false\n"
-    )
 
 
 def _real_grok_home() -> Path:
@@ -186,19 +184,10 @@ class GrokBuildHarness(HeadlessCliHarness):
             raise HarnessStepError(
                 f"grok MCP healthcheck failed ({proc.returncode}): {output.strip()[-800:]}",
             )
-        if not any(re.search(r"\brle\b", line, re.IGNORECASE) for line in output.splitlines()):
-            raise HarnessStepError(
-                f"grok MCP healthcheck did not list rle: {output.strip()[-800:]}",
-            )
-        compat = [
-            name for name in ("wandb", "claude", "cursor")
-            if re.search(rf"\b{name}\b", output, re.IGNORECASE)
-        ]
-        if compat:
-            raise HarnessStepError(
-                "grok MCP healthcheck found unexpected compatibility MCPs: "
-                + ", ".join(compat),
-            )
+        try:
+            check_mcp_list_output(output)
+        except ValueError as exc:
+            raise HarnessStepError(str(exc)) from exc
         logger.info("grok MCP healthcheck passed: rle is available")
 
     async def start_agent(self, mcp_url: str) -> None:
@@ -213,12 +202,9 @@ class GrokBuildHarness(HeadlessCliHarness):
         self._prev_grok_home = os.environ.get("GROK_HOME")
         os.environ["GROK_HOME"] = str(self._grok_home)
         _copy_auth_into(self._grok_home)
-        cfg_text = mcp_config_toml(mcp_url)
-        (self._grok_home / "config.toml").write_text(cfg_text, encoding="utf-8")
+        (self._grok_home / "config.toml").write_text(mcp_config_toml(mcp_url), encoding="utf-8")
         # Project-scoped copy too (cwd priority / defense in depth).
-        cfg_dir = Path(self._workdir) / ".grok"
-        cfg_dir.mkdir()
-        (cfg_dir / "config.toml").write_text(cfg_text, encoding="utf-8")
+        write_project_grok_config(Path(self._workdir), mcp_url)
         logger.info(
             "isolated GROK_HOME=%s with RLE-only MCP at %s",
             self._grok_home, mcp_url,

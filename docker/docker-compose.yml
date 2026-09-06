@@ -1,0 +1,33 @@
+# Stock grok-build harness talking to RimAPI on the host (Docker Desktop)
+# or via host-gateway on Linux.
+#
+#   export XAI_API_KEY=xai-...
+#   docker compose -f docker/docker-compose.yml up --build
+#
+# One-tick Crashlanded (RimAPI must already be on :8765):
+#   docker compose -f docker/docker-compose.yml run --rm grok-harness \
+#     cal --ticks 1 --scenario crashlanded --model grok-4.6
+#
+# To join RLE's existing headless RimWorld compose network, also pass
+# docker/docker-compose.rle-network.yml (see that file).
+#
+# Do NOT bind-mount host ~/.grok, ~/.grok/config.toml, ~/.claude.json,
+# ~/.claude, or ~/.cursor — those are the plugin/compat zoo this image exists
+# to escape. Auth is XAI_API_KEY or an *auth.json file only*.
+
+services:
+  grok-harness:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: rle-grok-build:local
+    environment:
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      RIMAPI_URL: ${RIMAPI_URL:-http://host.docker.internal:8765}
+      GROK_HOME: /home/rle/.grok
+      GROK_AUTH_JSON: ${GROK_AUTH_JSON:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Optional auth.json *file* only — never bind-mount host ~/.grok:
+    #   volumes:
+    #     - /abs/path/to/auth.json:/auth/auth.json:ro

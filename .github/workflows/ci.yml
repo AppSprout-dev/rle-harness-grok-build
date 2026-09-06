@@ -23,3 +23,39 @@ jobs:
       - run: pytest -q
       - name: Visible to RLE (unavailable without the binary is expected)
         run: python -c "from rle.harness import format_harness_table; print(format_harness_table())"
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe Linux grok-build artifact
+        id: probe
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://x.ai/cli/stable || curl -fsSL https://storage.googleapis.com/grok-build-public-artifacts/cli/stable)
+          ver=$(printf '%s' "$ver" | tr -d '\r[:space:]')
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "Stable grok version: $ver"
+          code=$(curl -o /dev/null -sS -w '%{http_code}' --head \
+            "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-${ver}-linux-x86_64")
+          echo "http_code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" = "200" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "Linux grok binary not available (HTTP $code) — skipping image build"
+          fi
+      - name: Build stock grok+harness image
+        if: steps.probe.outputs.ok == 'true'
+        run: |
+          docker build -f docker/Dockerfile \
+            --build-arg GROK_VERSION=${{ steps.probe.outputs.version }} \
+            -t rle-grok-build:ci .
+      - name: Smoke mcp list (no RimWorld, no API key)
+        if: steps.probe.outputs.ok == 'true'
+        run: docker run --rm rle-grok-build:ci smoke
+      - name: Note skipped image build
+        if: steps.probe.outputs.ok != 'true'
+        run: |
+          echo "Skipped docker image build; Linux grok artifact missing or unreachable."
+          echo "Dockerfile + compose are still in the tree for local use."
