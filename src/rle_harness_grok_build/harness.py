@@ -7,8 +7,9 @@ Surface used (grok-build ``docs/user-guide/14-headless-mode.md`` and
   [--resume <sessionId>] [--max-turns N] [--disallowed-tools ...]``
   -> one JSON object: ``text``, ``sessionId``, ``usage{input_tokens,
   output_tokens, reasoning_tokens,...}``, ``total_cost_usd`` (when complete)
-* Isolated ``GROK_HOME`` (temp) with RLE-only MCP so the user's global
-  ``~/.grok/config.toml`` MCP zoo cannot drown out ``rle__*`` tools::
+* Isolated ``GROK_HOME`` (temp) with RLE-only MCP; Claude/Cursor compatibility
+  MCP imports are explicitly disabled so the user's global MCP zoo cannot drown
+  out ``rle__*`` tools::
 
       [mcp_servers.rle]
       url = "http://127.0.0.1:PORT/mcp"
@@ -27,6 +28,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -48,17 +50,23 @@ _AUTH_FILENAMES = ("auth.json", "mcp_credentials.json")
 TOOL_NAMING_NOTE = (
     "In this environment the RLE tools are namespaced by server: call rle__get_brief, "
     "rle__work_priority, rle__blueprint, ..., and finish with rle__end_turn. "
-    "The only MCP server available is rle — do not search for other tools."
+    "The only MCP server available is rle --- do not search for other tools."
 )
 
 
 def mcp_config_toml(mcp_url: str) -> str:
-    """RLE-only MCP config. Session header matches grok-build docs."""
+    """RLE-only MCP config with compatibility MCP imports disabled."""
     return (
         f"[mcp_servers.{MCP_SERVER_NAME}]\n"
         f'url = "{mcp_url}"\n'
         f"startup_timeout_sec = 30\n"
         f'headers = {{ "x-mcp-session-id" = "{{{{session_id}}}}" }}\n'
+        "\n"
+        "[compat.claude]\n"
+        "mcps = false\n"
+        "\n"
+        "[compat.cursor]\n"
+        "mcps = false\n"
     )
 
 
@@ -70,7 +78,7 @@ def _real_grok_home() -> Path:
 def _copy_auth_into(dest: Path) -> None:
     src = _real_grok_home()
     if not src.is_dir():
-        logger.warning("no %s — headless auth may fail without XAI_API_KEY", src)
+        logger.warning("no %s --- headless auth may fail without XAI_API_KEY", src)
         return
     for name in _AUTH_FILENAMES:
         path = src / name
@@ -159,13 +167,47 @@ class GrokBuildHarness(HeadlessCliHarness):
         self._session_id: str | None = None
         self._proc: asyncio.subprocess.Process | None = None
 
+    async def _healthcheck_mcp(self) -> None:
+        """Verify the isolated config exposes only the RLE MCP server."""
+        assert self._binary is not None and self._workdir is not None
+        proc = await asyncio.create_subprocess_exec(
+            self._binary, "mcp", "list", cwd=self._workdir,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=self._subprocess_env(),
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=20)
+        except asyncio.TimeoutError as exc:
+            proc.kill()
+            await proc.wait()
+            raise HarnessStepError("grok MCP healthcheck timed out after 20s") from exc
+        output = (stdout_b + stderr_b).decode("utf-8", errors="replace")
+        if proc.returncode != 0:
+            raise HarnessStepError(
+                f"grok MCP healthcheck failed ({proc.returncode}): {output.strip()[-800:]}",
+            )
+        if not any(re.search(r"\brle\b", line, re.IGNORECASE) for line in output.splitlines()):
+            raise HarnessStepError(
+                f"grok MCP healthcheck did not list rle: {output.strip()[-800:]}",
+            )
+        compat = [
+            name for name in ("wandb", "claude", "cursor")
+            if re.search(rf"\b{name}\b", output, re.IGNORECASE)
+        ]
+        if compat:
+            raise HarnessStepError(
+                "grok MCP healthcheck found unexpected compatibility MCPs: "
+                + ", ".join(compat),
+            )
+        logger.info("grok MCP healthcheck passed: rle is available")
+
     async def start_agent(self, mcp_url: str) -> None:
         binary = shutil.which(self.opts.binary)
         if binary is None:
             raise HarnessStepError(f"Grok Build binary {self.opts.binary!r} not found on PATH")
         self._binary = binary
         self._workdir = tempfile.mkdtemp(prefix="rle-grok-")
-        # Isolate from the user's ~/.grok MCP zoo (wandb, stripe, HF, …).
+        # Isolate from the user's ~/.grok MCP zoo (wandb, stripe, HF, ...).
         # Without this, grok burns the turn tool-searching and never hits rle__*.
         self._grok_home = Path(tempfile.mkdtemp(prefix="rle-grok-home-"))
         self._prev_grok_home = os.environ.get("GROK_HOME")
@@ -181,9 +223,10 @@ class GrokBuildHarness(HeadlessCliHarness):
             "isolated GROK_HOME=%s with RLE-only MCP at %s",
             self._grok_home, mcp_url,
         )
+        await self._healthcheck_mcp()
         if not os.environ.get(self.opts.api_key_env):
             logger.info(
-                "%s not set — relying on Grok Build's cached login for headless auth",
+                "%s not set --- relying on Grok Build's cached login for headless auth",
                 self.opts.api_key_env,
             )
 
@@ -204,18 +247,23 @@ class GrokBuildHarness(HeadlessCliHarness):
             workdir=self._workdir, session_id=self._session_id,
         )
         logger.debug("grok invocation: %s", " ".join(cmd[:1] + ["-p", "<prompt>"] + cmd[3:]))
-        self._proc = await asyncio.create_subprocess_exec(
+        proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=self._workdir,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             env=self._subprocess_env(),
         )
+        self._proc = proc
         try:
-            stdout_b, stderr_b = await self._proc.communicate()
+            stdout_b, stderr_b = await proc.communicate()
         except asyncio.CancelledError:
-            await self.abort_turn()
+            # communicate() owns the pipe readers; do not call it a second time
+            # from abort_turn after cancellation.
+            await self._terminate_process(proc)
             raise
-        returncode = self._proc.returncode or 0
-        self._proc = None
+        finally:
+            if self._proc is proc:
+                self._proc = None
+        returncode = proc.returncode or 0
         stdout = stdout_b.decode("utf-8", errors="replace")
         stderr = stderr_b.decode("utf-8", errors="replace")
         if stderr.strip():
@@ -230,28 +278,25 @@ class GrokBuildHarness(HeadlessCliHarness):
             self._session_id = str(sid)
         return turn
 
+    async def _terminate_process(self, proc: asyncio.subprocess.Process) -> None:
+        """Stop a subprocess without a second communicate() on its pipes."""
+        if proc.returncode is not None:
+            return
+        try:
+            proc.terminate()
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+        except ProcessLookupError:
+            pass
+
     async def abort_turn(self) -> None:
         proc = self._proc
-        if proc is not None and proc.returncode is None:
-            proc.terminate()
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=10)
-                stderr = (stderr_b or b"").decode("utf-8", errors="replace").strip()
-                if stderr:
-                    logger.warning("grok turn aborted; stderr (tail): %s", stderr[-2000:])
-                stdout = (stdout_b or b"").decode("utf-8", errors="replace").strip()
-                if stdout and not stderr:
-                    logger.warning("grok turn aborted; stdout (tail): %s", stdout[-2000:])
-            except asyncio.TimeoutError:
-                proc.kill()
-                logger.warning("grok turn aborted; process kill after communicate timeout")
-            except Exception as exc:  # noqa: BLE001 — best-effort drain
-                logger.warning("grok turn aborted; failed to drain output: %s", exc)
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-        self._proc = None
+        if proc is not None:
+            await self._terminate_process(proc)
+        if self._proc is proc:
+            self._proc = None
 
     async def stop_agent(self) -> None:
         await self.abort_turn()
