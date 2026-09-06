@@ -1,0 +1,77 @@
+# Drop-in `grok` that runs the stock Linux binary in Docker (Windows).
+# Prefer grok-docker.cmd as --harness-opt binary= so CreateProcess can exec it.
+# Requires Docker Desktop with the daemon running.
+param(
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$GrokArgs
+)
+
+$ErrorActionPreference = "Stop"
+$Image = if ($env:GROK_DOCKER_IMAGE) { $env:GROK_DOCKER_IMAGE } else { "rle-grok-build:local" }
+$McpUrl = if ($env:MCP_URL) { $env:MCP_URL } else { "http://host.docker.internal:8766/mcp" }
+
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Error "docker CLI not found. Install Docker Desktop and retry."
+    exit 127
+}
+docker info *>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Docker CLI is present but the daemon is not running. Start Docker Desktop."
+    exit 1
+}
+
+$cwdHost = $null
+$out = New-Object System.Collections.Generic.List[string]
+for ($i = 0; $i -lt $GrokArgs.Count; $i++) {
+    $a = $GrokArgs[$i]
+    if ($a -eq "--cwd" -and ($i + 1) -lt $GrokArgs.Count) {
+        $cwdHost = $GrokArgs[$i + 1]
+        [void]$out.Add("--cwd")
+        [void]$out.Add("/work")
+        $i++
+        continue
+    }
+    if ($a.StartsWith("--cwd=")) {
+        $cwdHost = $a.Substring(6)
+        [void]$out.Add("--cwd=/work")
+        continue
+    }
+    [void]$out.Add($a)
+}
+
+$dockerArgs = @(
+    "run", "--rm",
+    "--add-host=host.docker.internal:host-gateway",
+    "-e", "MCP_URL=$McpUrl",
+    "-e", "GROK_HOME=/home/grok/.grok"
+)
+if ($env:XAI_API_KEY) {
+    $dockerArgs += @("-e", "XAI_API_KEY=$($env:XAI_API_KEY)")
+}
+if ($env:GROK_AUTH_JSON -and (Test-Path -LiteralPath $env:GROK_AUTH_JSON) -and ((Get-Item $env:GROK_AUTH_JSON).Length -gt 0)) {
+    $dockerArgs += @("-v", "$($env:GROK_AUTH_JSON):/auth/auth.json:ro")
+}
+
+if ($env:GROK_HOME -and (Test-Path -LiteralPath $env:GROK_HOME -PathType Container)) {
+    $resolvedHome = (Resolve-Path -LiteralPath $env:GROK_HOME).Path
+    $hostDefault = Join-Path $HOME ".grok"
+    $resolvedDefault = $null
+    if (Test-Path -LiteralPath $hostDefault) {
+        $resolvedDefault = (Resolve-Path -LiteralPath $hostDefault).Path
+    }
+    if ($resolvedDefault -and ($resolvedHome -eq $resolvedDefault)) {
+        Write-Warning "refusing to mount host ~/.grok (plugin zoo). Using empty container home."
+    }
+    else {
+        $dockerArgs += @("-v", "${resolvedHome}:/home/grok/.grok")
+    }
+}
+
+if ($cwdHost -and (Test-Path -LiteralPath $cwdHost -PathType Container)) {
+    $resolvedCwd = (Resolve-Path -LiteralPath $cwdHost).Path
+    $dockerArgs += @("-v", "${resolvedCwd}:/work")
+}
+
+$dockerArgs += @($Image) + $out
+& docker @dockerArgs
+exit $LASTEXITCODE

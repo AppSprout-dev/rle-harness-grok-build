@@ -24,6 +24,7 @@ from rle_harness_grok_build.harness import (
     mcp_config_toml,
     parse_json_output,
 )
+from rle_harness_grok_build.isolated_home import DEFAULT_ADVERTISED_MCP_URL
 from rle_harness_grok_build.options import GrokBuildOptions
 
 NAME = "grok-build"
@@ -149,6 +150,31 @@ class TestAgainstFakeBinary:
         assert "--resume" not in argvs[0]
         assert argvs[1][argvs[1].index("--resume") + 1] == "sess-9"
         assert argvs[0][argvs[0].index("-m") + 1] == "grok-4.6"
+
+    async def test_advertise_url_written_to_isolated_home(self, tmp_path: Path) -> None:
+        fake = _fake_grok(tmp_path)
+        harness = GrokBuildHarness(GrokBuildOptions(
+            binary=str(fake),
+            mcp_advertise_url=DEFAULT_ADVERTISED_MCP_URL,
+        ))
+        mock = MockRimAPI()
+        async with RimAPIClient("http://mock") as client:
+            mock.attach(client)
+            harness._ctx = HarnessContext(config=RLEConfig(tick_interval=0.0), client=client)
+            await harness.start_agent("http://127.0.0.1:54321/mcp")
+            try:
+                assert harness._grok_home is not None and harness._workdir is not None
+                home_cfg = (harness._grok_home / "config.toml").read_text(encoding="utf-8")
+                proj_cfg = (Path(harness._workdir) / ".grok" / "config.toml").read_text(
+                    encoding="utf-8",
+                )
+                assert DEFAULT_ADVERTISED_MCP_URL in home_cfg
+                assert "127.0.0.1:54321" not in home_cfg
+                assert DEFAULT_ADVERTISED_MCP_URL in proj_cfg
+                env = harness._subprocess_env()
+                assert env["MCP_URL"] == DEFAULT_ADVERTISED_MCP_URL
+            finally:
+                await harness.stop_agent()
 
     async def test_nonzero_exit_is_a_step_error(self, tmp_path: Path) -> None:
         # Healthcheck needs `mcp list` to succeed; only headless `-p` should fail.

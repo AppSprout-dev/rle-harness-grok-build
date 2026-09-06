@@ -9,6 +9,7 @@ from rle.harness import Availability, BaseHarness, HarnessContext
 from rle.testing.scripted_agent import ScriptedMcpHarness
 
 from rle_harness_grok_build.harness import GrokBuildHarness, binary_version
+from rle_harness_grok_build.isolated_home import resolve_binary
 from rle_harness_grok_build.options import GrokBuildOptions
 
 
@@ -20,22 +21,27 @@ class GrokBuildPlugin:
     )
 
     def available(self) -> Availability:
-        if shutil.which("grok") is None:
-            return Availability.missing(
-                "grok binary not on PATH (install: curl -fsSL https://x.ai/cli/install.sh | bash) "
-                "or pass --harness-opt binary=/path/to/grok",
-            )
-        return Availability.available()
+        if resolve_binary("grok") is not None:
+            return Availability.available()
+        # Windows escape hatch: stock Linux grok via docker/grok-docker.cmd
+        if shutil.which("docker") is not None:
+            return Availability.available()
+        return Availability.missing(
+            "grok binary not on PATH and docker not found. "
+            "Install grok (curl -fsSL https://x.ai/cli/install.sh | bash) "
+            "or Docker Desktop + docker/grok-docker.sh|.cmd "
+            "(--harness-opt binary=...).",
+        )
 
     def option_schema(self) -> type[BaseModel]:
         return GrokBuildOptions
 
     def create(self, ctx: HarnessContext, options: BaseModel) -> BaseHarness:
         assert isinstance(options, GrokBuildOptions)
-        if shutil.which(options.binary) is None:
+        if resolve_binary(options.binary) is None:
             raise RuntimeError(
                 f"Grok Build binary {options.binary!r} not found; set --harness-opt "
-                "binary=/path/to/grok",
+                "binary=docker/grok-docker.sh (or grok-docker.cmd on Windows)",
             )
         return GrokBuildHarness(options)
 
