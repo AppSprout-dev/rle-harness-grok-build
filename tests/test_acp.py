@@ -83,7 +83,7 @@ class TestAcpHelpers:
         assert cmd[cmd.index("-m") + 1] == "grok-4.6"
         assert cmd[cmd.index("--max-turns") + 1] == "20"
         assert "--disallowed-tools" in cmd
-        assert "--no-subagents" in cmd and "--no-plan" in cmd
+        assert "--no-subagents" not in cmd and "--no-plan" not in cmd
         serve_at = cmd.index("serve")
         assert cmd[serve_at:] == ["serve", "--bind", "127.0.0.1:2419", "--secret", "tok"]
         assert serve_at > cmd.index("--always-approve")

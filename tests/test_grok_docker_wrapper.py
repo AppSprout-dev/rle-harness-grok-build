@@ -361,3 +361,5 @@ class TestGrokDockerShPersist:
         assert "grok agent --always-approve" in text
         assert 'serve --bind "$bind" --secret "$GROK_AGENT_SECRET"' in text
         assert "GROK_AGENT_SECRET" in text
+        assert "--no-subagents" not in text
+        assert "--no-plan" not in text

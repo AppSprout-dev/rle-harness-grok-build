@@ -104,7 +104,6 @@ def agent_option_flags(opts: GrokBuildOptions, *, model: str | None) -> list[str
         flags += ["--reasoning-effort", opts.reasoning_effort]
     if opts.disallowed_tools:
         flags += ["--disallowed-tools", ",".join(opts.disallowed_tools)]
-    flags += ["--no-subagents", "--no-plan"]
     flags += list(opts.extra_args)
     return flags
 
