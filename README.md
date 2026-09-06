@@ -85,6 +85,22 @@ docker run --rm rle-grok-build:local mcp list    # must list rle only
 Grok is pinned (`GROK_VERSION=1.0.13`). Docker Desktop may have the CLI
 while the **daemon is stopped** — start it before build/run.
 
+### Windows / Docker Desktop caveats
+
+Docker Desktop on Windows returns **exit 125 Access is denied** when the
+wrapper bind-mounts harness temp dirs under `%TEMP%` (typically
+`AppData\Local\Temp\rle-grok-home-*` for `GROK_HOME` and `Temp\rle-grok-*`
+for `--cwd`). `grok-docker.ps1` / `.sh` detect those hostile paths, **skip
+the mount** with a warning, and rely on `MCP_URL` plus an empty container
+`GROK_HOME` (the entrypoint writes RLE-only `config.toml`).
+
+`--rm` means grok session files do not persist across ticks when the host
+temp home is not mounted. Set `GROK_DOCKER_HOME_VOLUME` to a named volume
+to persist `/home/grok/.grok` without using `%TEMP%`.
+
+Auth stays `XAI_API_KEY` (or a mounted `auth.json` file). Do not bake
+secrets into the image.
+
 ### Host cal (after McpHost PR)
 
 Harness + scenario loop stay on Windows. Point `binary` at the wrapper:

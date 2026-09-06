@@ -96,9 +96,32 @@ python scripts/run_scenario.py crashlanded --harness grok-build \
 Wrappers:
 
 * inject `host.docker.internal:host-gateway`
-* rewrite `--cwd <host>` → mount + `/work`
-* mount a **temp** `GROK_HOME` (harness-created) but **refuse** `~/.grok`
+* rewrite `--cwd <host>` → `/work` (mount only when the host path is safe)
+* mount a **non-temp** harness `GROK_HOME` but **refuse** `~/.grok`
+* **skip** Windows `%TEMP%` / `AppData\Local\Temp` / `Temp\rle-grok*` mounts
+  (Docker Desktop exit 125 Access is denied) and rely on `MCP_URL` + empty
+  container `GROK_HOME` (entrypoint writes config)
+* optional `GROK_DOCKER_HOME_VOLUME` named volume for session persist across `--rm`
 * forward `XAI_API_KEY` / `GROK_AUTH_JSON`
+
+## Windows / Docker Desktop caveats
+
+On Windows the harness puts isolated `GROK_HOME` and `--cwd` under
+`%TEMP%` (`AppData\Local\Temp\rle-grok-home-*`, `Temp\rle-grok-*`).
+Docker Desktop refuses those bind-mounts (**exit 125 Access is denied**).
+
+Local proof: skipping those mounts lets `mcp list` healthcheck pass
+(lists **rle**) with `MCP_URL` and an empty container home. Smoke with
+`XAI_API_KEY` works.
+
+`--rm` discards the container filesystem each tick, so `--resume` across
+ticks needs a non-Temp volume. Set:
+
+```powershell
+$env:GROK_DOCKER_HOME_VOLUME = "rle-grok-home"
+```
+
+Do not bake secrets. Do not mount host `~/.grok`.
 
 ## What is deliberately NOT mounted
 
