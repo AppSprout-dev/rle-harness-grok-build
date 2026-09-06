@@ -122,6 +122,12 @@ def _fake_grok(tmp_path: Path) -> Path:
     return script
 
 
+def _prompt_argvs(tmp_path: Path) -> list[list[str]]:
+    """Argv lines from headless `-p` turns only (skip `mcp list` healthchecks)."""
+    lines = (tmp_path / "argv.json").read_text().splitlines()
+    return [json.loads(line) for line in lines if json.loads(line)[:1] == ["-p"]]
+
+
 class TestAgainstFakeBinary:
     async def test_two_turns_resume_session(self, tmp_path: Path) -> None:
         fake = _fake_grok(tmp_path)
@@ -139,15 +145,24 @@ class TestAgainstFakeBinary:
                 await harness.stop_agent()
         assert turn1.text == "ok" and turn1.prompt_tokens == 5
         assert turn2.extras["session_id"] == "sess-9"
-        argvs = [json.loads(line) for line in (tmp_path / "argv.json").read_text().splitlines()]
+        argvs = _prompt_argvs(tmp_path)
+        assert len(argvs) == 2
         assert "--resume" not in argvs[0]
         assert argvs[1][argvs[1].index("--resume") + 1] == "sess-9"
         assert argvs[0][argvs[0].index("-m") + 1] == "grok-4.6"
-        assert os.environ  # sanity: env passthrough not modified
 
     async def test_nonzero_exit_is_a_step_error(self, tmp_path: Path) -> None:
+        # Healthcheck needs `mcp list` to succeed; only headless `-p` should fail.
         fake = tmp_path / "grok"
-        fake.write_text("#!/bin/sh\necho 'auth failed' >&2\nexit 1\n")
+        fake.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "if sys.argv[1:3] == ['mcp', 'list']:\n"
+            "    print('rle')\n"
+            "    raise SystemExit(0)\n"
+            "print('auth failed', file=sys.stderr)\n"
+            "raise SystemExit(1)\n",
+        )
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
         harness = GrokBuildHarness(GrokBuildOptions(binary=str(fake)))
         mock = MockRimAPI()
