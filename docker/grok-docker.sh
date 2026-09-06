@@ -173,8 +173,23 @@ if [[ "$PERSIST_ACTION" == "start" ]]; then
     exit 1
   fi
   docker rm -f "$PERSIST_CONTAINER" >/dev/null 2>&1 || true
-  # Detached, named, no --rm. Entrypoint `persist` sleeps after writing config.
-  exec docker run -d --name "$PERSIST_CONTAINER" "${docker_args[@]}" "$IMAGE" persist
+  image_cmd=(persist)
+  # ACP: publish host:port:2419 and run documented grok agent serve as PID 1.
+  if [[ -n "${RLE_GROK_ACP_PUBLISH:-}" ]]; then
+    docker_args+=(-p "${RLE_GROK_ACP_PUBLISH}")
+    if [[ -n "${GROK_AGENT_SECRET:-}" ]]; then
+      docker_args+=(-e "GROK_AGENT_SECRET=${GROK_AGENT_SECRET}")
+    fi
+    agent_flags=()
+    for a in "${out[@]}"; do
+      if [[ "$a" != "persist" && "$a" != "acp-serve" ]]; then
+        agent_flags+=("$a")
+      fi
+    done
+    image_cmd=(acp-serve "${agent_flags[@]}")
+  fi
+  # Detached, named, no --rm.
+  exec docker run -d --name "$PERSIST_CONTAINER" "${docker_args[@]}" "$IMAGE" "${image_cmd[@]}"
 fi
 
 exec docker run --rm "${docker_args[@]}" "$IMAGE" "${out[@]}"

@@ -72,6 +72,13 @@ jobs:
           docker rm -f "$name"
           printf '%s\n' "$out"
           printf '%s\n' "$out" | grep -qi rle
+      - name: Smoke grok agent CLI has serve
+        if: steps.probe.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          out=$(docker run --rm --entrypoint grok rle-grok-build:ci agent --help)
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -qi serve
       - name: Note skipped image build
         if: steps.probe.outputs.ok != 'true'
         run: |

@@ -9,6 +9,9 @@ from pathlib import Path
 
 from rle_harness_grok_build.argv_json import ARGV_JSON_ENV, write_argv_json
 from rle_harness_grok_build.persist import (
+    ACP_PUBLISH_ENV,
+    ACP_SECRET_ENV,
+    ACP_SERVE_ARG,
     PERSIST_ACTION_ENV,
     PERSIST_CONTAINER_ENV,
     PERSIST_KEEPALIVE_ARG,
@@ -50,6 +53,9 @@ def _run_wrapper(
         ARGV_JSON_ENV,
         PERSIST_ACTION_ENV,
         PERSIST_CONTAINER_ENV,
+        ACP_PUBLISH_ENV,
+        ACP_SECRET_ENV,
+        "GROK_ACP_BIND",
     ):
         env.pop(key, None)
     env.update(extra_env)
@@ -205,6 +211,9 @@ class TestGrokDockerPs1Invoke:
         assert "& docker @execArgs" in text
         assert "& docker @startArgs" in text
         assert "RLE_GROK_PERSIST_ACTION" in text
+        assert "RLE_GROK_ACP_PUBLISH" in text
+        assert "acp-serve" in text
+        assert "GROK_AGENT_SECRET" in text
         assert "/entrypoint.sh" in text
         assert "RLE_GROK_DOCKER_TRACE" in text
         invoke_lines = [
@@ -315,3 +324,40 @@ class TestGrokDockerShPersist:
         )
         assert '[[ "${1:-}" == "persist" ]]' in text
         assert "sleep infinity" in text
+
+    def test_start_acp_serve_publishes_port(self, tmp_path: Path) -> None:
+        cwd = tmp_path / "safe-work"
+        cwd.mkdir()
+        proc = _run_wrapper(
+            tmp_path,
+            ["--cwd", str(cwd), "-m", "grok-4.6", ACP_SERVE_ARG],
+            {
+                PERSIST_ACTION_ENV: "start",
+                PERSIST_CONTAINER_ENV: "rle-grok-acp",
+                ACP_PUBLISH_ENV: "127.0.0.1:2419:2419",
+                ACP_SECRET_ENV: "tok",
+            },
+        )
+        assert proc.returncode == 0, proc.stderr
+        lines = proc.stdout.splitlines()
+        assert "run" in lines
+        assert "-d" in lines
+        assert "-p" in lines
+        assert "127.0.0.1:2419:2419" in lines
+        assert "GROK_AGENT_SECRET=tok" in lines
+        assert ACP_SERVE_ARG in lines
+        assert PERSIST_KEEPALIVE_ARG not in lines
+        assert "--rm" not in lines
+        assert "-m" in lines
+        assert "grok-4.6" in lines
+        assert "--cwd" in lines
+        assert "/work" in lines
+
+    def test_entrypoint_acp_serve(self) -> None:
+        text = (Path(__file__).resolve().parents[1] / "docker" / "entrypoint.sh").read_text(
+            encoding="utf-8",
+        )
+        assert '[[ "${1:-}" == "acp-serve" ]]' in text
+        assert "grok agent --always-approve" in text
+        assert 'serve --bind "$bind" --secret "$GROK_AGENT_SECRET"' in text
+        assert "GROK_AGENT_SECRET" in text

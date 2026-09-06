@@ -15,6 +15,7 @@ dependencies = [
     "rimworld-learning-environment>=0.4.1",
     "mcp>=2.1",
     "pydantic>=2.0",
+    "websockets>=13.0",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +30,7 @@ packages = ["src/rle_harness_grok_build"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["src", "tests"]
 
 [tool.ruff]
 line-length = 100

@@ -16,9 +16,11 @@ from rle_harness_grok_build.argv_json import ARGV_JSON_ENV
 from rle_harness_grok_build.harness import GrokBuildHarness
 from rle_harness_grok_build.options import GrokBuildOptions
 from rle_harness_grok_build.persist import (
+    ACP_SERVE_ARG,
     PERSIST_ACTION_ENV,
     PERSIST_CONTAINER_ENV,
     PERSIST_KEEPALIVE_ARG,
+    apply_acp_env,
     apply_persist_env,
     new_container_name,
     persist_start_args,
@@ -37,6 +39,17 @@ class TestPersistHelpers:
         assert persist_start_args("/bin/grok-docker.sh", "/tmp/w") == [
             "/bin/grok-docker.sh", "--cwd", "/tmp/w", PERSIST_KEEPALIVE_ARG,
         ]
+        assert persist_start_args(
+            "/bin/grok-docker.sh", "/tmp/w", acp=True, agent_flags=["-m", "grok-4.6"],
+        ) == [
+            "/bin/grok-docker.sh", "--cwd", "/tmp/w", "-m", "grok-4.6", ACP_SERVE_ARG,
+        ]
+
+    def test_apply_acp_env(self) -> None:
+        env: dict[str, str] = {}
+        apply_acp_env(env, publish="127.0.0.1:9:2419", secret="tok")
+        assert env["RLE_GROK_ACP_PUBLISH"] == "127.0.0.1:9:2419"
+        assert env["GROK_AGENT_SECRET"] == "tok"
 
     def test_apply_persist_env(self) -> None:
         env: dict[str, str] = {}
@@ -53,6 +66,9 @@ class TestPersistHelpers:
         assert GrokBuildOptions(warm=True).warm_enabled
         assert GrokBuildOptions(persistent=True).warm_enabled
         assert GrokBuildOptions(warm=True, persistent=True).warm_enabled
+        assert not GrokBuildOptions().acp_enabled
+        assert GrokBuildOptions(acp=True).acp_enabled
+        assert GrokBuildOptions(mode="acp").acp_enabled
 
 
 def _fake_persist_wrapper(tmp_path: Path) -> Path:
