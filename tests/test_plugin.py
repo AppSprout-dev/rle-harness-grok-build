@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,7 @@ from rle.testing import MockRimAPI, run_harness_smoke
 from rle_harness_grok_build.argv_json import ARGV_JSON_ENV
 from rle_harness_grok_build.harness import (
     GrokBuildHarness,
+    binary_version,
     build_command,
     mcp_config_toml,
     parse_json_output,
@@ -256,3 +259,39 @@ def _fake_grok_docker_wrapper(tmp_path: Path) -> Path:
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     return script
+
+
+class TestStaleArgvJsonEnv:
+    def test_subprocess_env_pops_stale_sidecar(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ARGV_JSON_ENV, "/tmp/does-not-exist-rle-grok-argv.json")
+        harness = GrokBuildHarness(GrokBuildOptions())
+        env = harness._subprocess_env()
+        assert ARGV_JSON_ENV not in env
+        assert ARGV_JSON_ENV in os.environ
+
+    def test_binary_version_uses_fresh_sidecar_for_absolute_cmd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        wrapper = tmp_path / "grok-docker.cmd"
+        wrapper.write_text("@echo off\r\n", encoding="utf-8")
+        # Not +x: shutil.which misses Windows .cmd; resolve_binary still finds it.
+        stale = tmp_path / "missing.json"
+        monkeypatch.setenv(ARGV_JSON_ENV, str(stale))
+        captured: dict[str, object] = {}
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            env = kwargs.get("env")
+            assert isinstance(env, dict)
+            sidecar = env.get(ARGV_JSON_ENV)
+            assert isinstance(sidecar, str)
+            captured["cmd"] = cmd
+            captured["sidecar"] = sidecar
+            captured["argv"] = json.loads(Path(sidecar).read_text(encoding="utf-8"))
+            return subprocess.CompletedProcess(cmd, 0, stdout="grok 1.2.3\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert binary_version(str(wrapper)) == "grok 1.2.3"
+        assert captured["cmd"] == [str(wrapper.resolve())]
+        assert captured["argv"] == ["--version"]
+        assert captured["sidecar"] != str(stale)
+        assert not Path(str(captured["sidecar"])).exists()

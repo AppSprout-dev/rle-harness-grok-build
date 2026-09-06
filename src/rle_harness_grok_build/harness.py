@@ -37,7 +37,7 @@ from typing import Any, ClassVar
 from rle.harness import HarnessStepError
 from rle.harness.cli_base import HeadlessCliHarness, TurnResult
 
-from rle_harness_grok_build.argv_json import prepare_docker_wrapper_invocation
+from rle_harness_grok_build.argv_json import ARGV_JSON_ENV, prepare_docker_wrapper_invocation
 from rle_harness_grok_build.isolated_home import (
     AUTH_FILENAMES,
     check_mcp_list_output,
@@ -232,6 +232,8 @@ class GrokBuildHarness(HeadlessCliHarness):
 
     def _subprocess_env(self) -> dict[str, str]:
         env = os.environ.copy()
+        # A leftover sidecar path from a prior/manual run must not leak into children.
+        env.pop(ARGV_JSON_ENV, None)
         if self._grok_home is not None:
             env["GROK_HOME"] = str(self._grok_home)
         if self._mcp_url is not None:
@@ -327,14 +329,27 @@ class GrokBuildHarness(HeadlessCliHarness):
 
 
 def binary_version(binary: str) -> str:
-    path = shutil.which(binary)
+    # resolve_binary finds absolute .cmd/.ps1/.sh wrappers when shutil.which misses them.
+    path = resolve_binary(binary)
     if path is None:
         return "not installed"
+    env = os.environ.copy()
+    env.pop(ARGV_JSON_ENV, None)
+    sidecar = None
     try:
+        invoke, sidecar = prepare_docker_wrapper_invocation([path, "--version"], env)
         out = subprocess.run(
-            [path, "--version"], capture_output=True, text=True, timeout=15, check=False,
+            invoke,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired):
         return "unknown"
+    finally:
+        if sidecar is not None:
+            sidecar.unlink(missing_ok=True)
     text = (out.stdout or out.stderr).strip()
     return text.splitlines()[0] if text else "unknown"
