@@ -63,15 +63,15 @@ from rle_harness_grok_build.acp import (
     client_ws_host,
     resolve_acp_listen,
 )
-from rle_harness_grok_build.cost import (
-    parse_cost_usd,
-    parse_generation_ids,
-    provider_cost_extras,
-)
 from rle_harness_grok_build.argv_json import (
     ARGV_JSON_ENV,
     is_docker_wrapper_binary,
     prepare_docker_wrapper_invocation,
+)
+from rle_harness_grok_build.cost import (
+    parse_cost_usd,
+    parse_generation_ids,
+    provider_cost_extras,
 )
 from rle_harness_grok_build.isolated_home import (
     AUTH_FILENAMES,
