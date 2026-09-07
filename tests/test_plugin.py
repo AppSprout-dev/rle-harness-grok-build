@@ -98,7 +98,34 @@ class TestInvocationShaping:
         assert turn.reasoning_tokens == 40
         assert turn.extras["session_id"] == "s-1"
         assert turn.extras["cost_usd"] == 0.0127
+        assert turn.extras["cost_source"] == "billed"
         assert turn.extras["num_turns"] == 4
+        assert turn.extras["usage"]["input_tokens"] == 700
+
+    def test_parse_json_output_cost_in_usd_alias(self) -> None:
+        payload = {
+            "text": "ok", "sessionId": "s-2",
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "cost_in_usd": "0.0042",
+            "requestId": "req-alias-1",
+        }
+        turn = parse_json_output(json.dumps(payload))
+        assert turn.prompt_tokens == 0
+        assert turn.completion_tokens == 0
+        assert turn.extras["cost_usd"] == 0.0042
+        assert turn.extras["cost_source"] == "billed"
+        assert turn.extras["generation_id"] == "req-alias-1"
+        assert turn.extras["generation_ids"] == ["req-alias-1"]
+
+    def test_parse_json_output_no_cost_leaves_source_unset(self) -> None:
+        payload = {
+            "text": "ok", "sessionId": "s-3",
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+        }
+        turn = parse_json_output(json.dumps(payload))
+        assert "cost_usd" not in turn.extras
+        assert "cost_source" not in turn.extras
+        assert turn.extras["usage"]["input_tokens"] == 10
 
     def test_parse_error_object(self) -> None:
         with pytest.raises(HarnessStepError, match="Couldn't start"):
