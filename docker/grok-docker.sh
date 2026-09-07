@@ -116,14 +116,34 @@ for a in "${grok_args[@]}"; do
   prev="$a"
 done
 
+# Forward API key env vars by name. Never bake secrets into the image/config.
+append_compat_env() {
+  local -n _dest=$1
+  if [[ -n "${XAI_API_KEY:-}" ]]; then
+    _dest+=(-e "XAI_API_KEY=${XAI_API_KEY}")
+  fi
+  if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+    _dest+=(-e "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}")
+  fi
+  for var in OPENAI_COMPAT GROK_PROVIDER GROK_MODEL GROK_BASE_URL GROK_API_KEY_ENV GROK_API_BACKEND; do
+    if [[ -n "${!var:-}" ]]; then
+      _dest+=(-e "${var}=${!var}")
+    fi
+  done
+  local key_env="${GROK_API_KEY_ENV:-}"
+  if [[ -n "$key_env" && "$key_env" != "XAI_API_KEY" && "$key_env" != "OPENROUTER_API_KEY" ]]; then
+    if [[ -n "${!key_env:-}" ]]; then
+      _dest+=(-e "${key_env}=${!key_env}")
+    fi
+  fi
+}
+
 docker_args=(
   --add-host=host.docker.internal:host-gateway
   -e "MCP_URL=${MCP_URL}"
   -e "GROK_HOME=/home/grok/.grok"
 )
-if [[ -n "${XAI_API_KEY:-}" ]]; then
-  docker_args+=(-e "XAI_API_KEY=${XAI_API_KEY}")
-fi
+append_compat_env docker_args
 if [[ -n "${GROK_AUTH_JSON:-}" && -s "${GROK_AUTH_JSON}" ]]; then
   docker_args+=(-v "${GROK_AUTH_JSON}:/auth/auth.json:ro")
 fi
@@ -161,9 +181,7 @@ if [[ "$PERSIST_ACTION" == "exec" ]]; then
     -e "MCP_URL=${MCP_URL}"
     -e "GROK_HOME=/home/grok/.grok"
   )
-  if [[ -n "${XAI_API_KEY:-}" ]]; then
-    exec_args+=(-e "XAI_API_KEY=${XAI_API_KEY}")
-  fi
+  append_compat_env exec_args
   exec docker exec "${exec_args[@]}" "$PERSIST_CONTAINER" /entrypoint.sh "${out[@]}"
 fi
 

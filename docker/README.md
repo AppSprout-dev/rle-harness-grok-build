@@ -45,11 +45,26 @@ Docker Desktop before build/run; wrappers exit with a clear error otherwise.
 
 ## Auth (do not bake secrets)
 
-Preferred:
+Preferred (xAI):
 
 ```bash
 export XAI_API_KEY=xai-...
 ```
+
+OpenRouter (no `XAI_API_KEY`):
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+export OPENAI_COMPAT=true
+export GROK_MODEL=google/gemini-3.8-flash
+# optional; defaults when OPENAI_COMPAT=true / GROK_PROVIDER=openrouter
+export GROK_BASE_URL=https://openrouter.ai/api/v1
+export GROK_API_KEY_ENV=OPENROUTER_API_KEY
+```
+
+The entrypoint writes the same isolated `[model.<id>]` stanza as the harness
+(`base_url` + `env_key`; never the secret). See Grok Build
+[11-custom-models.md](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md).
 
 Or mount **only** `auth.json` (not the whole `~/.grok` tree):
 
@@ -112,7 +127,10 @@ Wrappers:
   bind-mount hint only — it is **not** forwarded to `grok agent` (nor are
   other `grok -p` flags). The host harness talks ACP over the published
   WebSocket (`/ws`). `docker exec /entrypoint.sh mcp list` still works.
-* forward `XAI_API_KEY` / `GROK_AUTH_JSON`
+* forward `XAI_API_KEY` / `OPENROUTER_API_KEY` / `GROK_AUTH_JSON` and
+  OpenAI-compat knobs (`OPENAI_COMPAT`, `GROK_PROVIDER`, `GROK_MODEL`,
+  `GROK_BASE_URL`, `GROK_API_KEY_ENV`) so the entrypoint can write
+  `[model.<id>]` when the host temp `GROK_HOME` is not mounted
 * load grok argv from `RLE_GROK_ARGV_JSON` (UTF-8 JSON array) when the harness
   sets it — required on Windows because `grok-docker.cmd` → `powershell -File
   … %*` drops quoted / large `-p` prompts

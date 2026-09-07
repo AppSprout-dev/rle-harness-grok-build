@@ -14,6 +14,37 @@ mkdir -p "$GROK_HOME"
 rm -rf "$GROK_HOME/plugins" "$GROK_HOME/skills"
 rm -f "$GROK_HOME/mcp.json" "$GROK_HOME/managed_config.toml" "$GROK_HOME/requirements.toml"
 
+toml_basic_string() {
+  # Quote for TOML keys/values. Model ids may contain '/' (OpenRouter).
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '"%s"' "$s"
+}
+
+# OpenAI-compat / OpenRouter: same [model.<id>] shape as isolated_home.mcp_config_toml.
+# Secrets stay in the env named by env_key — never written into config.toml.
+compat_model=""
+compat_base_url="${GROK_BASE_URL:-}"
+compat_env_key="${GROK_API_KEY_ENV:-}"
+compat_backend="${GROK_API_BACKEND:-chat_completions}"
+compat_provider="$(printf '%s' "${GROK_PROVIDER:-}" | tr '[:upper:]' '[:lower:]')"
+compat_openai="$(printf '%s' "${OPENAI_COMPAT:-}" | tr '[:upper:]' '[:lower:]')"
+if [[ "$compat_openai" == "true" || "$compat_openai" == "1" || "$compat_openai" == "yes" || "$compat_provider" == "openrouter" ]]; then
+  if [[ -z "$compat_base_url" ]]; then
+    compat_base_url="https://openrouter.ai/api/v1"
+  fi
+  if [[ -z "$compat_env_key" ]]; then
+    compat_env_key="OPENROUTER_API_KEY"
+  fi
+fi
+if [[ -n "${GROK_MODEL:-}" && -n "$compat_base_url" ]]; then
+  compat_model="$GROK_MODEL"
+  if [[ -z "$compat_env_key" ]]; then
+    compat_env_key="OPENROUTER_API_KEY"
+  fi
+fi
+
 write_config() {
   local dest="$1"
   mkdir -p "$(dirname "$dest")"
@@ -29,6 +60,15 @@ mcps = false
 [compat.cursor]
 mcps = false
 EOF
+  if [[ -n "$compat_model" && -n "$compat_base_url" ]]; then
+    {
+      printf '\n[model.%s]\n' "$(toml_basic_string "$compat_model")"
+      printf 'model = %s\n' "$(toml_basic_string "$compat_model")"
+      printf 'base_url = %s\n' "$(toml_basic_string "$compat_base_url")"
+      printf 'env_key = %s\n' "$(toml_basic_string "$compat_env_key")"
+      printf 'api_backend = %s\n' "$(toml_basic_string "$compat_backend")"
+    } >> "$dest"
+  fi
 }
 
 write_config "$GROK_HOME/config.toml"

@@ -36,8 +36,28 @@ python scripts/run_scenario.py crashlanded --harness grok-build --model grok-4.6
 python scripts/run_benchmark.py --harness grok-build --harness felix --runs 4
 ```
 
-Local-first models work too: point `~/.grok/config.toml` at an OpenAI-compatible
-`base_url` (see Grok Build's `11-custom-models.md`) and pass that model name with `--model`.
+Local-first / OpenRouter models work via isolated `config.toml` (do **not** mount
+host `~/.grok`). Grok Build custom models:
+[11-custom-models.md](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md).
+`--harness-opt openai_compat=true` (or `provider=openrouter`) writes
+`[model.<id>]` with `base_url` + `env_key` — Docker entrypoint writes the same
+stanza so stock Linux grok can call OpenRouter without `XAI_API_KEY`.
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+# XAI_API_KEY is not required
+python scripts/run_scenario.py crashlanded --harness grok-build \
+  --model google/gemini-3.8-flash --ticks 10 --tick-interval 30 \
+  --harness-opt openai_compat=true \
+  --harness-opt api_key_env=OPENROUTER_API_KEY \
+  --harness-opt base_url=https://openrouter.ai/api/v1 \
+  --harness-opt binary=./docker/grok-docker.sh \
+  --harness-opt mcp_advertise_url=http://host.docker.internal:8766/mcp
+```
+
+`provider=openrouter` is an alias for `openai_compat=true` and defaults
+`base_url` / `api_key_env` the same way. ACP stays off unless you pass
+`acp=true`.
 
 Options (`--harness-opt key=value`):
 
@@ -57,6 +77,10 @@ Options (`--harness-opt key=value`):
 | `extra_args` | – | Raw flags appended to every `grok -p` invocation. Headless-only flags are stripped on `grok agent serve` (see [ACP vs `-p` flags](#acp-vs--p-flags)) |
 | `mcp_advertise_url` | – | URL written into grok config (Docker: `http://host.docker.internal:8766/mcp`) |
 | `mcp_container_reachable` | RLE config | Bind MCP on `0.0.0.0:8766` and advertise `host.docker.internal` |
+| `openai_compat` | false | Write OpenAI-compat `[model.<id>]` (`base_url` + `env_key`) into isolated config |
+| `provider` | – | `provider=openrouter` aliases `openai_compat=true` |
+| `base_url` | OpenRouter when enabled | Inference endpoint (default `https://openrouter.ai/api/v1`) |
+| `api_key_env` | `XAI_API_KEY` | Env var holding the key (`OPENROUTER_API_KEY` when OpenRouter mode is on) |
 
 ## Docker (stock Linux grok only)
 
@@ -70,8 +94,9 @@ stays here.
 Host desktop grok still loads plugins / Claude-Cursor compat MCPs after the
 GROK_HOME isolation patches (PRs #1 / #2). The sidecar starts from an empty
 `GROK_HOME` and writes RLE-only `config.toml` (`compat.*.mcps = false`).
-Auth is `XAI_API_KEY` (preferred) or a mounted `auth.json` **file**. Never
-mount host `~/.grok`.
+Auth is `XAI_API_KEY` (xAI) or `OPENROUTER_API_KEY` (OpenRouter /
+`--harness-opt openai_compat=true`), or a mounted `auth.json` **file**.
+Never mount host `~/.grok`. Do not bake secrets into the image.
 
 ### Prerequisite (RLE `McpHost` — sibling PR)
 
@@ -109,8 +134,8 @@ the mount** with a warning, and rely on `MCP_URL` plus an empty container
 temp home is not mounted. Set `GROK_DOCKER_HOME_VOLUME` to a named volume
 to persist `/home/grok/.grok` without using `%TEMP%`.
 
-Auth stays `XAI_API_KEY` (or a mounted `auth.json` file). Do not bake
-secrets into the image.
+Auth stays `XAI_API_KEY` or `OPENROUTER_API_KEY` (or a mounted `auth.json`
+file). Do not bake secrets into the image.
 
 ### Windows argv JSON (required for `grok-docker.cmd`)
 

@@ -10,8 +10,13 @@ import pytest
 from rle_harness_grok_build.harness import mcp_config_toml as harness_mcp_config_toml
 from rle_harness_grok_build.isolated_home import (
     DEFAULT_ADVERTISED_MCP_URL,
+    DEFAULT_API_BACKEND,
     DEFAULT_HOST_RIMAPI_URL,
+    DEFAULT_OPENROUTER_API_KEY_ENV,
+    DEFAULT_OPENROUTER_BASE_URL,
+    DEFAULT_XAI_API_KEY_ENV,
     FORBIDDEN_HOST_BIND_SOURCES,
+    CustomModel,
     check_mcp_list_output,
     effective_mcp_url,
     is_host_plugin_home,
@@ -26,6 +31,7 @@ from rle_harness_grok_build.isolated_home import (
     write_isolated_grok_home,
     write_project_grok_config,
 )
+from rle_harness_grok_build.options import GrokBuildOptions
 
 
 class TestMcpConfig:
@@ -36,11 +42,76 @@ class TestMcpConfig:
         assert "[compat.claude]" in toml and "mcps = false" in toml
         assert "[compat.cursor]" in toml
         assert harness_mcp_config_toml("http://x") == mcp_config_toml("http://x")
+        assert "[model." not in toml
+        assert "openrouter" not in toml
+        assert "base_url" not in toml
+        assert "env_key" not in toml
 
     def test_does_not_mention_host_plugin_servers(self) -> None:
         toml = mcp_config_toml("http://rle/mcp")
         assert "wandb" not in toml
         assert "huggingface" not in toml
+
+    def test_openrouter_model_keeps_mcp_and_writes_env_key(self) -> None:
+        spec = CustomModel(
+            model="google/gemini-3.8-flash",
+            base_url=DEFAULT_OPENROUTER_BASE_URL,
+            env_key=DEFAULT_OPENROUTER_API_KEY_ENV,
+        )
+        toml = mcp_config_toml("http://host.docker.internal:8766/mcp", spec)
+        assert "[mcp_servers.rle]" in toml
+        assert "[compat.claude]" in toml and "mcps = false" in toml
+        assert "[compat.cursor]" in toml
+        assert '[model."google/gemini-3.8-flash"]' in toml
+        assert 'model = "google/gemini-3.8-flash"' in toml
+        assert f'base_url = "{DEFAULT_OPENROUTER_BASE_URL}"' in toml
+        assert f'env_key = "{DEFAULT_OPENROUTER_API_KEY_ENV}"' in toml
+        assert f'api_backend = "{DEFAULT_API_BACKEND}"' in toml
+        assert "sk-or-" not in toml
+        assert "api_key =" not in toml
+
+    def test_xai_default_path_unchanged_when_opts_off(self) -> None:
+        assert GrokBuildOptions().resolve_custom_model("grok-4.6") is None
+        assert mcp_config_toml("http://x") == mcp_config_toml("http://x", None)
+
+
+class TestOpenRouterOptions:
+    def test_openai_compat_defaults(self) -> None:
+        opts = GrokBuildOptions(openai_compat=True)
+        assert opts.openai_compat_enabled
+        assert opts.effective_base_url == DEFAULT_OPENROUTER_BASE_URL
+        assert opts.effective_api_key_env == DEFAULT_OPENROUTER_API_KEY_ENV
+        spec = opts.resolve_custom_model("deepseek/deepseek-v4-flash-0731")
+        assert spec is not None
+        assert spec.model == "deepseek/deepseek-v4-flash-0731"
+        assert spec.base_url == DEFAULT_OPENROUTER_BASE_URL
+        assert spec.env_key == DEFAULT_OPENROUTER_API_KEY_ENV
+
+    def test_provider_openrouter_alias(self) -> None:
+        opts = GrokBuildOptions(provider="openrouter")
+        assert opts.openai_compat_enabled
+        spec = opts.resolve_custom_model("google/gemini-3.8-flash")
+        assert spec is not None
+        assert spec.env_key == DEFAULT_OPENROUTER_API_KEY_ENV
+
+    def test_explicit_api_key_env_and_base_url(self) -> None:
+        opts = GrokBuildOptions(
+            openai_compat=True,
+            api_key_env="MY_OR_KEY",
+            base_url="https://openrouter.ai/api/v1/",
+        )
+        assert opts.effective_api_key_env == "MY_OR_KEY"
+        assert opts.effective_base_url == "https://openrouter.ai/api/v1"
+        spec = opts.resolve_custom_model("google/gemini-3.8-flash")
+        assert spec is not None
+        assert spec.env_key == "MY_OR_KEY"
+
+    def test_xai_default_api_key_env_when_opts_off(self) -> None:
+        opts = GrokBuildOptions()
+        assert not opts.openai_compat_enabled
+        assert opts.effective_api_key_env == DEFAULT_XAI_API_KEY_ENV
+        assert opts.effective_base_url is None
+        assert opts.acp_enabled is False
 
 
 class TestUrlResolution:
@@ -134,6 +205,23 @@ class TestWriteIsolatedHome:
         assert (home / "auth.json").read_text(encoding="utf-8") == '{"token":"x"}'
         assert not (home / "plugins").exists()
         assert "wandb" not in written
+        assert "[model." not in written
+        assert "openrouter" not in written
+
+    def test_writes_openrouter_model_when_enabled(self, tmp_path: Path) -> None:
+        home = tmp_path / "grok-home"
+        spec = CustomModel(
+            model="google/gemini-3.8-flash",
+            base_url=DEFAULT_OPENROUTER_BASE_URL,
+            env_key=DEFAULT_OPENROUTER_API_KEY_ENV,
+        )
+        write_isolated_grok_home(home, "http://127.0.0.1:9/mcp", custom_model=spec)
+        written = (home / "config.toml").read_text(encoding="utf-8")
+        assert written == mcp_config_toml("http://127.0.0.1:9/mcp", spec)
+        assert "[mcp_servers.rle]" in written
+        assert f'base_url = "{DEFAULT_OPENROUTER_BASE_URL}"' in written
+        assert f'env_key = "{DEFAULT_OPENROUTER_API_KEY_ENV}"' in written
+        assert "sk-" not in written
 
     def test_skips_empty_auth(self, tmp_path: Path) -> None:
         home = tmp_path / "h"

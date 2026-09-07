@@ -32,7 +32,7 @@ RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh \
     && mkdir -p /home/grok/.grok /auth /work \
     && chown -R grok:grok /home/grok /auth /work
 
-# Empty writable home. Auth: XAI_API_KEY or /auth/auth.json.
+# Empty writable home. Auth: XAI_API_KEY, OPENROUTER_API_KEY, or /auth/auth.json.
 # MCP_URL is the *advertised* RLE McpHost URL (sibling RLE PR: 0.0.0.0:8766).
 ENV GROK_HOME=/home/grok/.grok \
     HOME=/home/grok \

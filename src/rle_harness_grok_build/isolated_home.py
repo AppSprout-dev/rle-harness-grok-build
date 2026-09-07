@@ -3,8 +3,10 @@
 The host Windows hang (180s, 0 tokens) is hypothesized to be environment
 pollution: desktop grok loads Claude/Cursor compat MCPs and plugins even after
 a temp GROK_HOME. The Linux container writes a *fresh* home that contains only
-the RLE MCP stanza plus optional ``auth.json``. It never copies host
-``~/.grok/config.toml``, ``~/.claude.json``, or the plugin zoo.
+the RLE MCP stanza, optional OpenAI-compat ``[model.*]`` entries, and
+optional ``auth.json``. It never copies host ``~/.grok/config.toml``,
+``~/.claude.json``, or the plugin zoo. Auth is an env var named by
+``env_key`` (never baked into config).
 
 Architecture (locked):
 
@@ -22,10 +24,24 @@ import os
 import re
 import shutil
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 MCP_SERVER_NAME = "rle"
 COMPAT_MCP_NAMES = ("wandb", "claude", "cursor")
+
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+DEFAULT_XAI_API_KEY_ENV = "XAI_API_KEY"
+DEFAULT_API_BACKEND = "chat_completions"
+
+# Docker entrypoint / wrappers read these; never the secret itself.
+COMPAT_ENV_OPENAI = "OPENAI_COMPAT"
+COMPAT_ENV_PROVIDER = "GROK_PROVIDER"
+COMPAT_ENV_MODEL = "GROK_MODEL"
+COMPAT_ENV_BASE_URL = "GROK_BASE_URL"
+COMPAT_ENV_API_KEY_ENV = "GROK_API_KEY_ENV"
+COMPAT_ENV_API_BACKEND = "GROK_API_BACKEND"
 
 # Auth files the container *may* ingest. Never config.toml / plugins.
 AUTH_FILENAMES = ("auth.json", "mcp_credentials.json")
@@ -63,9 +79,44 @@ _POLLUTION_NAMES = (
 )
 
 
-def mcp_config_toml(mcp_url: str) -> str:
-    """RLE-only MCP config with compatibility MCP imports disabled."""
-    return (
+def _toml_basic_string(value: str) -> str:
+    """Quote *value* as a TOML basic string (keys and values)."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+@dataclass(frozen=True)
+class CustomModel:
+    """OpenAI-compatible ``[model.<name>]`` block (Grok Build custom-models)."""
+
+    model: str
+    base_url: str
+    env_key: str
+    api_backend: str = DEFAULT_API_BACKEND
+
+    def to_toml(self) -> str:
+        key = _toml_basic_string(self.model)
+        return (
+            "\n"
+            f"[model.{key}]\n"
+            f"model = {_toml_basic_string(self.model)}\n"
+            f"base_url = {_toml_basic_string(self.base_url)}\n"
+            f"env_key = {_toml_basic_string(self.env_key)}\n"
+            f"api_backend = {_toml_basic_string(self.api_backend)}\n"
+        )
+
+
+def mcp_config_toml(
+    mcp_url: str,
+    custom_model: CustomModel | None = None,
+) -> str:
+    """RLE-only MCP config with compatibility MCP imports disabled.
+
+    When *custom_model* is set, append an OpenAI-compatible ``[model.<id>]``
+    stanza (``base_url`` + ``env_key``; never an inline API key). See
+    xai-org/grok-build ``docs/user-guide/11-custom-models.md``.
+    """
+    text = (
         f"[mcp_servers.{MCP_SERVER_NAME}]\n"
         f'url = "{mcp_url}"\n'
         f"startup_timeout_sec = 30\n"
@@ -77,6 +128,9 @@ def mcp_config_toml(mcp_url: str) -> str:
         "[compat.cursor]\n"
         "mcps = false\n"
     )
+    if custom_model is not None:
+        text += custom_model.to_toml()
+    return text
 
 
 def effective_mcp_url(bind_url: str, advertise_url: str | None) -> str:
@@ -216,6 +270,7 @@ def write_isolated_grok_home(
     mcp_url: str,
     *,
     auth_json: Path | None = None,
+    custom_model: CustomModel | None = None,
 ) -> Path:
     """Create an empty-ish GROK_HOME with RLE-only ``config.toml``.
 
@@ -224,18 +279,24 @@ def write_isolated_grok_home(
     """
     home.mkdir(parents=True, exist_ok=True)
     wipe_plugin_pollution(home)
-    (home / "config.toml").write_text(mcp_config_toml(mcp_url), encoding="utf-8")
+    (home / "config.toml").write_text(
+        mcp_config_toml(mcp_url, custom_model), encoding="utf-8",
+    )
     if auth_json is not None and auth_json.is_file() and auth_json.stat().st_size > 0:
         shutil.copy2(auth_json, home / "auth.json")
     return home
 
 
-def write_project_grok_config(workdir: Path, mcp_url: str) -> Path:
+def write_project_grok_config(
+    workdir: Path,
+    mcp_url: str,
+    custom_model: CustomModel | None = None,
+) -> Path:
     """Project-scoped ``.grok/config.toml`` (cwd priority / defense in depth)."""
     cfg_dir = workdir / ".grok"
     cfg_dir.mkdir(parents=True, exist_ok=True)
     path = cfg_dir / "config.toml"
-    path.write_text(mcp_config_toml(mcp_url), encoding="utf-8")
+    path.write_text(mcp_config_toml(mcp_url, custom_model), encoding="utf-8")
     return path
 
 
@@ -246,6 +307,7 @@ def prepare_runtime_grok_home(
     auth_json: Path | None = None,
     workdir: Path | None = None,
     env: Mapping[str, str] | None = None,
+    custom_model: CustomModel | None = None,
 ) -> Path:
     """Write isolated home, optional project config, and export ``GROK_HOME``."""
     environ = os.environ if env is None else env
@@ -254,9 +316,11 @@ def prepare_runtime_grok_home(
         env_home = environ.get("GROK_HOME")
         dest = Path(env_home) if env_home else Path.home() / ".grok"
     resolved_auth = resolve_auth_json(auth_json, env=environ)
-    write_isolated_grok_home(dest, mcp_url, auth_json=resolved_auth)
+    write_isolated_grok_home(
+        dest, mcp_url, auth_json=resolved_auth, custom_model=custom_model,
+    )
     if workdir is not None:
-        write_project_grok_config(workdir, mcp_url)
+        write_project_grok_config(workdir, mcp_url, custom_model)
     if environ is os.environ:
         os.environ["GROK_HOME"] = str(dest)
     return dest
