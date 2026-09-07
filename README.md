@@ -54,7 +54,7 @@ Options (`--harness-opt key=value`):
 | `disallowed_tools` | shell/edit/web tools | Built-ins removed so the agent can only act via RLE tools |
 | `turn_timeout_s` | 180 | Kill the invocation after this many seconds |
 | `extra_instructions` | – | Appended to every turn prompt |
-| `extra_args` | – | Raw flags appended to every invocation |
+| `extra_args` | – | Raw flags appended to every invocation. `--no-subagents` / `--no-plan` are stripped on `grok agent serve` |
 | `mcp_advertise_url` | – | URL written into grok config (Docker: `http://host.docker.internal:8766/mcp`) |
 | `mcp_container_reachable` | RLE config | Bind MCP on `0.0.0.0:8766` and advertise `host.docker.internal` |
 
@@ -272,6 +272,12 @@ python scripts/run_scenario.py crashlanded --harness grok-build --model grok-4.6
 Same knobs as warm: `binary`, `max_turns`, `disallowed_tools`, `XAI_API_KEY`,
 `mcp_advertise_url`, `mcp_container_reachable`, `GROK_DOCKER_HOME_VOLUME`.
 
+Host `binary=grok` + `acp=true` does **not** need a temp wrapper. The harness
+never forwards `--no-subagents` / `--no-plan` to `grok agent … serve` (those
+are headless `grok -p` flags; pinned `grok agent` exits 2 if they appear),
+including when they show up in `extra_args`. Docker `acp-serve` was cleaned
+in #9; host argv is the same contract.
+
 ### How to measure TTFA (ACP vs warm vs cold)
 
 Same seed/scoring/timeout; compare `acp=true` vs `warm=true` vs default:
@@ -292,6 +298,7 @@ Same seed/scoring/timeout; compare `acp=true` vs `warm=true` vs default:
 - Warm: `docker run -d --name rle-grok-…` once, then `docker exec … /entrypoint.sh grok -p …`
   each tick; `sessionId`, `usage` and `total_cost_usd` from the JSON object feed RLE's tracking.
 - ACP: one `grok agent serve` WebSocket; each tick is `session/prompt` until `stopReason`.
+  Host and docker argv omit `--no-subagents` / `--no-plan` (no temp wrapper).
 - `--smoke-test` needs no Grok Build: a scripted agent plays the same MCP round trip.
 
 ## Development

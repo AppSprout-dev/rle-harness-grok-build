@@ -44,6 +44,14 @@ class TestPersistHelpers:
         ) == [
             "/bin/grok-docker.sh", "--cwd", "/tmp/w", "-m", "grok-4.6", ACP_SERVE_ARG,
         ]
+        assert persist_start_args(
+            "/bin/grok-docker.sh",
+            "/tmp/w",
+            acp=True,
+            agent_flags=["--no-subagents", "-m", "grok-4.6", "--no-plan"],
+        ) == [
+            "/bin/grok-docker.sh", "--cwd", "/tmp/w", "-m", "grok-4.6", ACP_SERVE_ARG,
+        ]
 
     def test_apply_acp_env(self) -> None:
         env: dict[str, str] = {}

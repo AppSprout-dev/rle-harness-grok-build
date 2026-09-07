@@ -18,6 +18,7 @@ from rle.testing import MockRimAPI
 
 from rle_harness_grok_build.acp import (
     ACP_CONTAINER_PORT,
+    AGENT_SERVE_UNSUPPORTED_FLAGS,
     AcpClient,
     AcpError,
     acp_ws_url,
@@ -27,6 +28,7 @@ from rle_harness_grok_build.acp import (
     pick_loopback_port,
     redact_ws_url,
     resolve_acp_listen,
+    without_agent_serve_unsupported_flags,
 )
 from rle_harness_grok_build.argv_json import ARGV_JSON_ENV
 from rle_harness_grok_build.harness import GrokBuildHarness
@@ -88,15 +90,44 @@ class TestAcpHelpers:
         assert cmd[serve_at:] == ["serve", "--bind", "127.0.0.1:2419", "--secret", "tok"]
         assert serve_at > cmd.index("--always-approve")
 
+    def test_host_acp_argv_strips_legacy_flags_from_extra_args(self) -> None:
+        cmd = build_agent_serve_command(
+            "/bin/grok",
+            bind="127.0.0.1:2419",
+            secret="tok",
+            cwd="/tmp/w",
+            model=None,
+            opts=GrokBuildOptions(extra_args=["--no-subagents", "--foo", "--no-plan"]),
+        )
+        assert cmd[:3] == ["/bin/grok", "agent", "--always-approve"]
+        assert "--foo" in cmd
+        assert "--no-subagents" not in cmd and "--no-plan" not in cmd
+        assert AGENT_SERVE_UNSUPPORTED_FLAGS.isdisjoint(cmd)
+        assert cmd[cmd.index("serve"):] == [
+            "serve", "--bind", "127.0.0.1:2419", "--secret", "tok",
+        ]
+
     def test_agent_option_flags_and_persist_start(self) -> None:
         flags = agent_option_flags(
-            GrokBuildOptions(max_turns=6, extra_args=["--foo"]), model="grok-4.6",
+            GrokBuildOptions(
+                max_turns=6,
+                extra_args=["--no-subagents", "--foo", "--no-plan"],
+            ),
+            model="grok-4.6",
         )
         assert flags[:2] == ["-m", "grok-4.6"]
         assert "--foo" in flags
+        assert "--no-subagents" not in flags and "--no-plan" not in flags
         assert persist_start_args("/bin/grok-docker.sh", "/tmp/w", acp=True, agent_flags=flags) == [
             "/bin/grok-docker.sh", "--cwd", "/tmp/w", *flags, ACP_SERVE_ARG,
         ]
+        dirty = ["--no-subagents", "-m", "grok-4.6", "--no-plan"]
+        assert persist_start_args(
+            "/bin/grok-docker.sh", "/tmp/w", acp=True, agent_flags=dirty,
+        ) == [
+            "/bin/grok-docker.sh", "--cwd", "/tmp/w", "-m", "grok-4.6", ACP_SERVE_ARG,
+        ]
+        assert without_agent_serve_unsupported_flags(dirty) == ["-m", "grok-4.6"]
 
     def test_apply_acp_env(self) -> None:
         env: dict[str, str] = {}
@@ -332,8 +363,28 @@ class TestAcpHarnessLifecycle:
         assert serve[serve.index("-m") + 1] == "grok-4.6"
         assert serve[serve.index("--secret") + 1] == "host-secret"
         assert "--bind" in serve
+        assert "-p" not in serve
+        assert "--no-subagents" not in serve and "--no-plan" not in serve
         assert harness._acp is None
         assert harness._serve_proc is None
+
+    async def test_host_acp_extra_args_cannot_reintroduce_legacy_flags(
+        self, tmp_path: Path,
+    ) -> None:
+        fake = _fake_host_grok(tmp_path)
+        harness = GrokBuildHarness(GrokBuildOptions(
+            binary=str(fake),
+            acp=True,
+            acp_secret="host-secret",
+            extra_args=["--no-subagents", "--foo", "--no-plan"],
+        ))
+        await _two_acp_turns(harness)
+        lines = [json.loads(line) for line in (tmp_path / "argv.json").read_text().splitlines()]
+        serve = next(row for row in lines if "serve" in row)
+        assert serve[:2] == ["agent", "--always-approve"]
+        assert "--foo" in serve
+        assert "--no-subagents" not in serve and "--no-plan" not in serve
+        assert AGENT_SERVE_UNSUPPORTED_FLAGS.isdisjoint(serve)
 
     async def test_mode_acp_alias(self, tmp_path: Path) -> None:
         fake = _fake_host_grok(tmp_path)
@@ -365,6 +416,7 @@ class TestAcpHarnessLifecycle:
         assert start["json"][0] == "--cwd"
         assert start["json"][-1] == ACP_SERVE_ARG
         assert "-m" in start["json"]
+        assert "--no-subagents" not in start["json"] and "--no-plan" not in start["json"]
         assert any(row["json"] == ["mcp", "list"] for row in rows)
         assert not any(row["json"] and row["json"][0] == "-p" for row in rows)
         assert harness._persist_container is None

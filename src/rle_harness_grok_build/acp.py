@@ -93,8 +93,22 @@ def redact_ws_url(url: str) -> str:
     ))
 
 
+# Headless ``grok -p`` accepts these (14-headless-mode.md). Pinned
+# ``grok agent`` (1.0.13) does not: unexpected argument, exit 2.
+AGENT_SERVE_UNSUPPORTED_FLAGS = frozenset({"--no-subagents", "--no-plan"})
+
+
+def without_agent_serve_unsupported_flags(args: Sequence[str]) -> list[str]:
+    """Drop ``--no-subagents`` / ``--no-plan`` so they never reach ``grok agent``."""
+    return [arg for arg in args if arg not in AGENT_SERVE_UNSUPPORTED_FLAGS]
+
+
 def agent_option_flags(opts: GrokBuildOptions, *, model: str | None) -> list[str]:
-    """Flags that belong after ``agent`` and before ``serve`` / ``stdio``."""
+    """Flags that belong after ``agent`` and before ``serve`` / ``stdio``.
+
+    Strips headless-only ``--no-subagents`` / ``--no-plan`` even when they
+    arrive via ``extra_args`` (host ACP and docker ``acp-serve`` ``"$@"``).
+    """
     flags: list[str] = []
     if model:
         flags += ["-m", model]
@@ -105,7 +119,7 @@ def agent_option_flags(opts: GrokBuildOptions, *, model: str | None) -> list[str
     if opts.disallowed_tools:
         flags += ["--disallowed-tools", ",".join(opts.disallowed_tools)]
     flags += list(opts.extra_args)
-    return flags
+    return without_agent_serve_unsupported_flags(flags)
 
 
 def build_agent_serve_command(
@@ -123,7 +137,7 @@ def build_agent_serve_command(
         cmd += ["--cwd", cwd]
     cmd += agent_option_flags(opts, model=model)
     cmd += ["serve", "--bind", bind, "--secret", secret]
-    return cmd
+    return without_agent_serve_unsupported_flags(cmd)
 
 
 @dataclass

@@ -133,6 +133,8 @@ def build_command(
         "--output-format", "json",
         "--yolo",
         "--cwd", workdir,
+        # Headless ``grok -p`` only. Never add these to ``grok agent serve``
+        # (pinned CLI: unexpected argument, exit 2).
         "--no-subagents",
         "--no-plan",
     ]
