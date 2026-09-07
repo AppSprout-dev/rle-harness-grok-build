@@ -239,11 +239,42 @@ if ($PersistAction -eq "start") {
         if ($env:GROK_AGENT_SECRET) {
             $dockerArgs += @("-e", "GROK_AGENT_SECRET=$($env:GROK_AGENT_SECRET)")
         }
+        # --cwd was rewritten for the /work bind-mount; do not forward it
+        # (or other grok -p flags) into acp-serve → grok agent (1.0.13 exit 2).
         $agentFlags = New-Object System.Collections.Generic.List[string]
+        $skipNext = $false
+        $pOnlySwitches = [System.Collections.Generic.HashSet[string]]::new(
+            [string[]]@(
+                "--no-subagents", "--no-plan", "--yolo", "-p", "--single",
+                "--include-partial-messages", "--fork-session", "--continue",
+                "-c", "--no-memory", "--disable-web-search", "persist", "acp-serve"
+            )
+        )
+        $pOnlyValues = [System.Collections.Generic.HashSet[string]]::new(
+            [string[]]@(
+                "--cwd", "--max-turns", "--disallowed-tools", "--output-format",
+                "--resume", "-r", "--reasoning-effort", "--effort",
+                "--session-id", "-s", "--prompt-json", "--prompt-file",
+                "--permission-mode", "--tools"
+            )
+        )
         foreach ($a in $out) {
-            if ($a -ne "persist" -and $a -ne "acp-serve") {
-                [void]$agentFlags.Add($a)
+            if ($skipNext) {
+                $skipNext = $false
+                continue
             }
+            if ($pOnlySwitches.Contains($a)) {
+                continue
+            }
+            $eq = $a.IndexOf("=")
+            $name = if ($eq -ge 0) { $a.Substring(0, $eq) } else { $a }
+            if ($pOnlyValues.Contains($name)) {
+                if ($eq -lt 0) {
+                    $skipNext = $true
+                }
+                continue
+            }
+            [void]$agentFlags.Add($a)
         }
         $imageCmd = @("acp-serve") + @($agentFlags)
     }

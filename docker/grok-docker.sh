@@ -180,11 +180,31 @@ if [[ "$PERSIST_ACTION" == "start" ]]; then
     if [[ -n "${GROK_AGENT_SECRET:-}" ]]; then
       docker_args+=(-e "GROK_AGENT_SECRET=${GROK_AGENT_SECRET}")
     fi
+    # --cwd was rewritten for the /work bind-mount; do not forward it (or
+    # other grok -p flags) into acp-serve → grok agent (1.0.13 exit 2).
     agent_flags=()
+    skip_next=0
     for a in "${out[@]}"; do
-      if [[ "$a" != "persist" && "$a" != "acp-serve" ]]; then
-        agent_flags+=("$a")
+      if ((skip_next)); then
+        skip_next=0
+        continue
       fi
+      if [[ "$a" == "persist" || "$a" == "acp-serve" ]]; then
+        continue
+      fi
+      case "$a" in
+        --cwd|--max-turns|--disallowed-tools|--output-format|--resume|-r|--reasoning-effort|--effort|--session-id|-s|--prompt-json|--prompt-file|--permission-mode|--tools)
+          skip_next=1
+          continue
+          ;;
+        --cwd=*|--max-turns=*|--disallowed-tools=*|--output-format=*|--resume=*|-r=*|--reasoning-effort=*|--effort=*|--session-id=*|-s=*|--prompt-json=*|--prompt-file=*|--permission-mode=*|--tools=*)
+          continue
+          ;;
+        --no-subagents|--no-plan|--yolo|-p|--single|--include-partial-messages|--fork-session|--continue|-c|--no-memory|--disable-web-search)
+          continue
+          ;;
+      esac
+      agent_flags+=("$a")
     done
     image_cmd=(acp-serve "${agent_flags[@]}")
   fi

@@ -107,8 +107,10 @@ Wrappers:
 * warm persist: `RLE_GROK_PERSIST_CONTAINER` + `RLE_GROK_PERSIST_ACTION=start|exec|stop`
   (`docker run -d --name`, `docker exec /entrypoint.sh`, `docker stop`/`rm`)
 * ACP serve: `RLE_GROK_ACP_PUBLISH=127.0.0.1:<host>:2419` + `GROK_AGENT_SECRET`
-  on persist **start** runs entrypoint `acp-serve` (`grok agent serve`) instead
-  of `persist` / `sleep infinity`. The host harness talks ACP over the published
+  on persist **start** runs entrypoint `acp-serve` (`grok agent --always-approve
+  serve`) instead of `persist` / `sleep infinity`. Wrapper `--cwd` is a
+  bind-mount hint only — it is **not** forwarded to `grok agent` (nor are
+  other `grok -p` flags). The host harness talks ACP over the published
   WebSocket (`/ws`). `docker exec /entrypoint.sh mcp list` still works.
 * forward `XAI_API_KEY` / `GROK_AUTH_JSON`
 * load grok argv from `RLE_GROK_ARGV_JSON` (UTF-8 JSON array) when the harness

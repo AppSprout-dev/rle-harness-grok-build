@@ -330,7 +330,18 @@ class TestGrokDockerShPersist:
         cwd.mkdir()
         proc = _run_wrapper(
             tmp_path,
-            ["--cwd", str(cwd), "-m", "grok-4.6", ACP_SERVE_ARG],
+            [
+                "--cwd", str(cwd),
+                "--max-turns", "9",
+                "--disallowed-tools", "web_search",
+                "--yolo",
+                "--no-subagents",
+                "--no-plan",
+                "--output-format", "json",
+                "--resume", "sid",
+                "-m", "grok-4.6",
+                ACP_SERVE_ARG,
+            ],
             {
                 PERSIST_ACTION_ENV: "start",
                 PERSIST_CONTAINER_ENV: "rle-grok-acp",
@@ -350,8 +361,16 @@ class TestGrokDockerShPersist:
         assert "--rm" not in lines
         assert "-m" in lines
         assert "grok-4.6" in lines
-        assert "--cwd" in lines
-        assert "/work" in lines
+        # Wrapper --cwd becomes a /work mount; it is not forwarded to acp-serve.
+        assert any(m.endswith(":/work") for m in _volume_targets(proc.stdout))
+        assert "--cwd" not in lines
+        assert "--max-turns" not in lines
+        assert "--disallowed-tools" not in lines
+        assert "--yolo" not in lines
+        assert "--no-subagents" not in lines
+        assert "--no-plan" not in lines
+        assert "--output-format" not in lines
+        assert "--resume" not in lines
 
     def test_entrypoint_acp_serve(self) -> None:
         text = (Path(__file__).resolve().parents[1] / "docker" / "entrypoint.sh").read_text(
@@ -360,6 +379,7 @@ class TestGrokDockerShPersist:
         assert '[[ "${1:-}" == "acp-serve" ]]' in text
         assert "grok agent --always-approve" in text
         assert 'serve --bind "$bind" --secret "$GROK_AGENT_SECRET"' in text
-        assert "--no-subagents" not in text
-        assert "--no-plan" not in text
         assert "GROK_AGENT_SECRET" in text
+        assert "skip_next" in text
+        assert "--max-turns" in text and "--disallowed-tools" in text
+        assert "--cwd" in text
