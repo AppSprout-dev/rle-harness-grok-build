@@ -28,6 +28,10 @@ class FakeAcpState:
     prompt_delay_s: float = 0.0
     text: str = "ok from acp"
     used_tokens: int = 12
+    cost: dict[str, Any] | None = field(
+        default_factory=lambda: {"amount": 0.01, "currency": "USD"},
+    )
+    generation_id: str | None = None
     request_permission: bool = False
     next_session: int = 1
 
@@ -142,17 +146,21 @@ async def _handle_message(
                 },
             },
         })
+        usage_update: dict[str, Any] = {
+            "sessionUpdate": "usage_update",
+            "used": state.used_tokens,
+            "size": 100000,
+        }
+        if state.cost is not None:
+            usage_update["cost"] = state.cost
+        if state.generation_id:
+            usage_update["generation_id"] = state.generation_id
         await send({
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
                 "sessionId": state.session_id,
-                "update": {
-                    "sessionUpdate": "usage_update",
-                    "used": state.used_tokens,
-                    "size": 100000,
-                    "cost": {"amount": 0.01, "currency": "USD"},
-                },
+                "update": usage_update,
             },
         })
         if state.prompt_delay_s:

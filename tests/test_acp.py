@@ -197,11 +197,71 @@ class TestAcpClientProtocol:
         assert turn.extras["session_id"] == "sess-acp-1"
         assert turn.extras["acp"] is True
         assert turn.extras["cost_usd"] == 0.01
+        assert turn.extras["cost_source"] == "billed"
+        assert turn.extras["cost"]["amount"] == 0.01
+        assert turn.extras["usage"]["used"] == 12
+        assert turn.extras["usage"]["cost"]["amount"] == 0.01
         assert state.methods[:3] == ["initialize", "session/new", "session/prompt"]
         assert state.prompts == ["RLE turn — tick 0"]
         turn2 = await client.prompt("tick 1")
         assert turn2.extras["stop_reason"] == "end_turn"
         assert state.prompts == ["RLE turn — tick 0", "tick 1"]
+
+    async def test_usage_cost_present_when_tokens_zero(self) -> None:
+        port = pick_loopback_port()
+        secret = "cost-secret"
+        state = FakeAcpState(
+            used_tokens=0,
+            cost={"amount": 0.25, "currency": "USD"},
+            generation_id="gen-zero",
+        )
+        ready = asyncio.Event()
+        task = asyncio.create_task(run_fake_acp("127.0.0.1", port, secret, state, ready))
+        await asyncio.wait_for(ready.wait(), timeout=5)
+        client = AcpClient(acp_ws_url("127.0.0.1", port, secret=secret), secret)
+        try:
+            await client.connect(timeout_s=5)
+            await client.initialize()
+            await client.new_session("/tmp/w")
+            turn = await client.prompt("zero tokens billed")
+            assert turn.prompt_tokens == 0
+            assert turn.extras["cost_usd"] == 0.25
+            assert turn.extras["cost_source"] == "billed"
+            assert turn.extras["cost"]["amount"] == 0.25
+            assert turn.extras["usage"]["used"] == 0
+            assert turn.extras["generation_id"] == "gen-zero"
+        finally:
+            await client.close()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def test_usage_without_cost_leaves_source_unset(self) -> None:
+        port = pick_loopback_port()
+        secret = "nocost-secret"
+        state = FakeAcpState(used_tokens=4, cost=None)
+        ready = asyncio.Event()
+        task = asyncio.create_task(run_fake_acp("127.0.0.1", port, secret, state, ready))
+        await asyncio.wait_for(ready.wait(), timeout=5)
+        client = AcpClient(acp_ws_url("127.0.0.1", port, secret=secret), secret)
+        try:
+            await client.connect(timeout_s=5)
+            await client.initialize()
+            await client.new_session("/tmp/w")
+            turn = await client.prompt("tokens only")
+            assert turn.prompt_tokens == 4
+            assert turn.extras["usage"]["used"] == 4
+            assert "cost_usd" not in turn.extras
+            assert "cost_source" not in turn.extras
+        finally:
+            await client.close()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def test_cancel_sets_cancelled_stop(
         self, fake_acp: tuple[FakeAcpState, AcpClient],

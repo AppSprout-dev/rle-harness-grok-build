@@ -19,7 +19,7 @@ import json
 import logging
 import socket
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
@@ -28,6 +28,11 @@ import websockets
 from rle.harness.cli_base import TurnResult
 from websockets.exceptions import ConnectionClosed
 
+from rle_harness_grok_build.cost import (
+    parse_cost_usd,
+    parse_generation_ids,
+    provider_cost_extras,
+)
 from rle_harness_grok_build.options import GrokBuildOptions
 
 logger = logging.getLogger(__name__)
@@ -194,6 +199,24 @@ class _TurnAccumulator:
     text_parts: list[str] = field(default_factory=list)
     used_tokens: int = 0
     cost_usd: float | None = None
+    usage: dict[str, Any] | None = None
+    cost: Any = None
+    generation_ids: list[str] = field(default_factory=list)
+
+    def absorb_provider_fields(self, payload: Mapping[str, Any] | None) -> None:
+        """Merge cost / usage / generation IDs from an ACP update or RPC result."""
+        if not isinstance(payload, Mapping):
+            return
+        parsed = parse_cost_usd(payload)
+        if parsed is not None:
+            self.cost_usd = parsed
+        if "cost" in payload:
+            self.cost = payload.get("cost")
+        if "usage" in payload and isinstance(payload.get("usage"), dict):
+            self.usage = dict(payload["usage"])
+        for gen_id in parse_generation_ids(payload):
+            if gen_id not in self.generation_ids:
+                self.generation_ids.append(gen_id)
 
     def on_update(self, params: dict[str, Any]) -> None:
         update = params.get("update")
@@ -208,28 +231,33 @@ class _TurnAccumulator:
                     self.text_parts.append(str(text))
             return
         if kind == "usage_update":
+            usage = {key: value for key, value in update.items() if key != "sessionUpdate"}
+            self.usage = usage
             used = update.get("used")
             if isinstance(used, int):
                 self.used_tokens = used
-            cost = update.get("cost")
-            if isinstance(cost, dict):
-                try:
-                    self.cost_usd = float(cost["amount"])
-                except (KeyError, TypeError, ValueError):
-                    pass
+            self.absorb_provider_fields(usage)
             return
         # tool_call / tool_call_update / plan / agent_thought_chunk: ignore.
 
     def to_turn_result(self, *, stop_reason: str | None, session_id: str) -> TurnResult:
+        extras: dict[str, Any] = {
+            "session_id": session_id,
+            "stop_reason": stop_reason,
+            "acp": True,
+        }
+        extras.update(
+            provider_cost_extras(
+                cost_usd=self.cost_usd,
+                generation_ids=self.generation_ids,
+                usage=self.usage,
+                cost=self.cost,
+            ),
+        )
         return TurnResult(
             text="".join(self.text_parts),
             prompt_tokens=self.used_tokens,
-            extras={
-                "session_id": session_id,
-                "stop_reason": stop_reason,
-                "cost_usd": self.cost_usd,
-                "acp": True,
-            },
+            extras=extras,
         )
 
 
@@ -334,6 +362,7 @@ class AcpClient:
             raw_stop = result.get("stopReason")
             if raw_stop is not None:
                 stop = str(raw_stop)
+            acc.absorb_provider_fields(result)
         return acc.to_turn_result(stop_reason=stop, session_id=self._session_id)
 
     async def cancel(self) -> None:

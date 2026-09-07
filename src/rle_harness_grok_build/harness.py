@@ -17,8 +17,9 @@ Surface used (grok-build ``docs/user-guide/14-headless-mode.md`` and
 
 * ``grok -p "<prompt>" --output-format json --yolo --cwd <workdir> [-m MODEL]
   [--resume <sessionId>] [--max-turns N] [--disallowed-tools ...]``
-  -> one JSON object: ``text``, ``sessionId``, ``usage{input_tokens,
-  output_tokens, reasoning_tokens,...}``, ``total_cost_usd`` (when complete)
+  -> one JSON object: ``text``, ``sessionId``, ``requestId``, ``usage{input_tokens,
+  output_tokens, reasoning_tokens,...}``, ``total_cost_usd`` / ``cost_in_usd``
+  (when complete; aliases fold into extras ``cost_usd`` with ``cost_source=billed``)
 * Isolated ``GROK_HOME`` (temp) with RLE-only MCP; Claude/Cursor compatibility
   MCP imports are explicitly disabled so the user's global MCP zoo cannot drown
   out ``rle__*`` tools::
@@ -66,6 +67,11 @@ from rle_harness_grok_build.argv_json import (
     ARGV_JSON_ENV,
     is_docker_wrapper_binary,
     prepare_docker_wrapper_invocation,
+)
+from rle_harness_grok_build.cost import (
+    parse_cost_usd,
+    parse_generation_ids,
+    provider_cost_extras,
 )
 from rle_harness_grok_build.isolated_home import (
     AUTH_FILENAMES,
@@ -176,21 +182,30 @@ def parse_json_output(stdout: str) -> TurnResult:
     if data.get("type") == "error":
         raise HarnessStepError(f"grok reported an error: {data.get('message', data)}")
     usage = data.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
     cached = int(usage.get("cache_read_input_tokens", 0) or 0) + int(
         usage.get("cache_creation_input_tokens", 0) or 0,
+    )
+    extras: dict[str, Any] = {
+        "session_id": str(data.get("sessionId", "")),
+        "stop_reason": data.get("stopReason"),
+        "num_turns": data.get("num_turns"),
+        "usage_is_incomplete": bool(data.get("usage_is_incomplete", False)),
+    }
+    extras.update(
+        provider_cost_extras(
+            cost_usd=parse_cost_usd(data),
+            generation_ids=parse_generation_ids(data),
+            usage=usage or None,
+        ),
     )
     return TurnResult(
         text=str(data.get("text", "")),
         prompt_tokens=int(usage.get("input_tokens", 0) or 0) + cached,
         completion_tokens=int(usage.get("output_tokens", 0) or 0),
         reasoning_tokens=int(usage.get("reasoning_tokens", 0) or 0),
-        extras={
-            "session_id": str(data.get("sessionId", "")),
-            "stop_reason": data.get("stopReason"),
-            "num_turns": data.get("num_turns"),
-            "cost_usd": data.get("total_cost_usd"),
-            "usage_is_incomplete": bool(data.get("usage_is_incomplete", False)),
-        },
+        extras=extras,
     )
 
 

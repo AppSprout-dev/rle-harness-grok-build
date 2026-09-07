@@ -339,7 +339,10 @@ Same seed/scoring/timeout; compare `acp=true` vs `warm=true` vs default:
 - Cold (default): `grok -p <prompt> --output-format json --yolo --cwd <workdir> --no-subagents
   --no-plan [-m model] [--resume sid] …` (or `docker run --rm` via the wrapper).
 - Warm: `docker run -d --name rle-grok-…` once, then `docker exec … /entrypoint.sh grok -p …`
-  each tick; `sessionId`, `usage` and `total_cost_usd` from the JSON object feed RLE's tracking.
+  each tick; `sessionId`, `usage`, `requestId`, and `total_cost_usd` /
+  `cost_in_usd` (and ACP `cost.amount`) fold into extras `cost_usd`. When the
+  provider sent a dollar amount, extras also set `cost_source=billed` so RLE
+  can use that figure even if tokens are 0; otherwise RLE estimates.
 - ACP: one `grok agent serve` WebSocket; each tick is `session/prompt` until `stopReason`.
   Serve argv is `grok agent --always-approve [-m MODEL] serve --bind … --secret …`
   (no temp wrapper; `-p`-only flags are never forwarded — see [ACP vs `-p` flags](#acp-vs--p-flags)).
