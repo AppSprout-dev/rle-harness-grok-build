@@ -18,6 +18,8 @@ import uuid
 from collections.abc import Sequence
 from typing import Literal
 
+from rle_harness_grok_build.acp import without_agent_serve_unsupported_flags
+
 PERSIST_CONTAINER_ENV = "RLE_GROK_PERSIST_CONTAINER"
 PERSIST_ACTION_ENV = "RLE_GROK_PERSIST_ACTION"
 ACP_PUBLISH_ENV = "RLE_GROK_ACP_PUBLISH"
@@ -47,7 +49,7 @@ def persist_start_args(
     """Wrapper argv so start can bind-mount ``--cwd`` then run persist/ACP serve."""
     cmd = [binary, "--cwd", workdir]
     if acp:
-        cmd.extend(agent_flags or ())
+        cmd.extend(without_agent_serve_unsupported_flags(agent_flags or ()))
         cmd.append(ACP_SERVE_ARG)
         return cmd
     cmd.append(PERSIST_KEEPALIVE_ARG)

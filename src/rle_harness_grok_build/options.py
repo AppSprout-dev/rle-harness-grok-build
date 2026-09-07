@@ -37,7 +37,12 @@ class GrokBuildOptions(HeadlessCliOptions):
         description="Env var holding the xAI API key for headless auth (or use cached login).",
     )
     extra_args: list[str] = Field(
-        default_factory=list, description="Additional raw flags appended to every invocation.",
+        default_factory=list,
+        description=(
+            "Additional raw flags appended to every invocation. "
+            "--no-subagents / --no-plan are stripped on grok agent serve "
+            "(host ACP and docker acp-serve); they remain on grok -p only."
+        ),
     )
     mcp_advertise_url: str | None = Field(
         default=None,
