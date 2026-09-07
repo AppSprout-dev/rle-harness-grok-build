@@ -67,6 +67,8 @@ class TestMcpConfig:
         assert f'base_url = "{DEFAULT_OPENROUTER_BASE_URL}"' in toml
         assert f'env_key = "{DEFAULT_OPENROUTER_API_KEY_ENV}"' in toml
         assert f'api_backend = "{DEFAULT_API_BACKEND}"' in toml
+        assert "HTTP-Referer" in toml
+        assert "rle-harness-grok-build" in toml
         assert "sk-or-" not in toml
         assert "api_key =" not in toml
 

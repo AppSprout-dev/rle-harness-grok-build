@@ -9,6 +9,7 @@ from rle_harness_grok_build.cost import (
     COST_SOURCE_BILLED,
     parse_cost_usd,
     parse_generation_ids,
+    parse_usage_tokens,
     provider_cost_extras,
 )
 from rle_harness_grok_build.harness import parse_json_output
@@ -29,6 +30,9 @@ class TestParseCostUsdAliases:
 
     def test_nested_usage_cost_in_usd(self) -> None:
         assert parse_cost_usd({"usage": {"cost_in_usd": 0.3}}) == 0.3
+
+    def test_openrouter_usage_cost_float(self) -> None:
+        assert parse_cost_usd({"usage": {"prompt_tokens": 10, "cost": 0.0015}}) == 0.0015
 
     def test_model_usage_cost_usd_sum(self) -> None:
         assert parse_cost_usd({
@@ -66,6 +70,32 @@ class TestParseGenerationIds:
 
     def test_ignores_session_id(self) -> None:
         assert parse_generation_ids({"sessionId": "abc123"}) == []
+
+    def test_openrouter_gen_prefix_id(self) -> None:
+        assert parse_generation_ids({"id": "gen-or-1"}) == ["gen-or-1"]
+        assert parse_generation_ids({"id": "tool-call-9"}) == []
+
+
+class TestParseUsageTokens:
+    def test_xai_input_tokens_unchanged(self) -> None:
+        tokens = parse_usage_tokens({
+            "usage": {"input_tokens": 12, "output_tokens": 3, "reasoning_tokens": 1},
+        })
+        assert (tokens.prompt_tokens, tokens.completion_tokens, tokens.reasoning_tokens) == (
+            12, 3, 1,
+        )
+
+    def test_openrouter_prompt_tokens(self) -> None:
+        tokens = parse_usage_tokens({
+            "usage": {
+                "prompt_tokens": 40,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 10},
+            },
+        })
+        assert tokens.prompt_tokens == 40
+        assert tokens.cached_tokens == 10
+        assert tokens.billable_prompt == 50
 
 
 class TestProviderCostExtras:

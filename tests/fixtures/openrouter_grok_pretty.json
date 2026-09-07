@@ -1,0 +1,13 @@
+some docker log: starting grok -p
+{
+  "text": "Called rle__end_turn.",
+  "stopReason": "end_turn",
+  "sessionId": "sess-pretty",
+  "usage": {
+    "prompt_tokens": 900,
+    "completion_tokens": 40,
+    "cost": 0.00021
+  },
+  "id": "gen-pretty-1"
+}
+trailing noise

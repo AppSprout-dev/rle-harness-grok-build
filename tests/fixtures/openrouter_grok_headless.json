@@ -1,0 +1,15 @@
+{
+  "text": "Placed a bed for Lee.",
+  "stopReason": "end_turn",
+  "sessionId": "sess-or-flash-1",
+  "id": "gen-or-gemini-flash-001",
+  "num_turns": 5,
+  "usage": {
+    "prompt_tokens": 18420,
+    "completion_tokens": 612,
+    "total_tokens": 19112,
+    "prompt_tokens_details": {"cached_tokens": 2400},
+    "completion_tokens_details": {"reasoning_tokens": 80},
+    "cost": 0.00486
+  }
+}

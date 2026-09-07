@@ -19,7 +19,9 @@ Surface used (grok-build ``docs/user-guide/14-headless-mode.md`` and
   [--resume <sessionId>] [--max-turns N] [--disallowed-tools ...]``
   -> one JSON object: ``text``, ``sessionId``, ``requestId``, ``usage{input_tokens,
   output_tokens, reasoning_tokens,...}``, ``total_cost_usd`` / ``cost_in_usd``
-  (when complete; aliases fold into extras ``cost_usd`` with ``cost_source=billed``)
+  (when complete; aliases fold into extras ``cost_usd`` with ``cost_source=billed``).
+  OpenRouter / openai_compat also accepts ``prompt_tokens`` / ``usage.cost`` /
+  ``id: gen-…`` and streaming-json ``usage`` / ``end`` lines.
 * Isolated ``GROK_HOME`` (temp) with RLE-only MCP; Claude/Cursor compatibility
   MCP imports are explicitly disabled so the user's global MCP zoo cannot drown
   out ``rle__*`` tools::
@@ -38,7 +40,6 @@ Surface used (grok-build ``docs/user-guide/14-headless-mode.md`` and
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import secrets
@@ -68,11 +69,7 @@ from rle_harness_grok_build.argv_json import (
     is_docker_wrapper_binary,
     prepare_docker_wrapper_invocation,
 )
-from rle_harness_grok_build.cost import (
-    parse_cost_usd,
-    parse_generation_ids,
-    provider_cost_extras,
-)
+from rle_harness_grok_build.cost import collect_metering, provider_cost_extras
 from rle_harness_grok_build.isolated_home import (
     AUTH_FILENAMES,
     COMPAT_ENV_API_BACKEND,
@@ -166,52 +163,40 @@ def build_command(
     return cmd
 
 
-def parse_json_output(stdout: str) -> TurnResult:
-    """Turn the headless ``json`` object into a TurnResult (tolerant of noise)."""
-    data: Any = None
-    text = stdout.strip()
-    # The object is the last JSON document on stdout; tolerate leading log lines.
-    for line in reversed(text.splitlines()):
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                data = json.loads(line)
-                break
-            except json.JSONDecodeError:
-                continue
+def parse_json_output(stdout: str, stderr: str = "") -> TurnResult:
+    """Turn headless ``json`` / streaming-json / OpenRouter shapes into a TurnResult.
+
+    Tolerates leading log lines, pretty-printed objects, and NDJSON. Token
+    counts accept XAI ``input_tokens`` and OpenAI/OpenRouter ``prompt_tokens``.
+    Provider USD (``total_cost_usd``, ``usage.cost``, ``modelUsage.*.costUSD``)
+    becomes extras ``cost_usd`` with ``cost_source=billed``. OpenRouter
+    ``id: gen-…`` lands in ``generation_ids`` so RLE can call ``/generation``.
+    """
+    metering = collect_metering(stdout, stderr)
+    data = metering.primary
     if data is None:
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            return TurnResult(text=text)
-    if not isinstance(data, dict):
-        return TurnResult(text=text)
+        return TurnResult(text=stdout.strip())
     if data.get("type") == "error":
         raise HarnessStepError(f"grok reported an error: {data.get('message', data)}")
-    usage = data.get("usage") or {}
-    if not isinstance(usage, dict):
-        usage = {}
-    cached = int(usage.get("cache_read_input_tokens", 0) or 0) + int(
-        usage.get("cache_creation_input_tokens", 0) or 0,
-    )
     extras: dict[str, Any] = {
-        "session_id": str(data.get("sessionId", "")),
-        "stop_reason": data.get("stopReason"),
+        "session_id": str(data.get("sessionId", "") or data.get("session_id", "")),
+        "stop_reason": data.get("stopReason") or data.get("stop_reason"),
         "num_turns": data.get("num_turns"),
         "usage_is_incomplete": bool(data.get("usage_is_incomplete", False)),
     }
     extras.update(
         provider_cost_extras(
-            cost_usd=parse_cost_usd(data),
-            generation_ids=parse_generation_ids(data),
-            usage=usage or None,
+            cost_usd=metering.cost_usd,
+            generation_ids=metering.generation_ids,
+            usage=metering.usage,
         ),
     )
+    tokens = metering.tokens
     return TurnResult(
-        text=str(data.get("text", "")),
-        prompt_tokens=int(usage.get("input_tokens", 0) or 0) + cached,
-        completion_tokens=int(usage.get("output_tokens", 0) or 0),
-        reasoning_tokens=int(usage.get("reasoning_tokens", 0) or 0),
+        text=metering.text,
+        prompt_tokens=tokens.billable_prompt,
+        completion_tokens=tokens.completion_tokens,
+        reasoning_tokens=tokens.reasoning_tokens,
         extras=extras,
     )
 
@@ -580,7 +565,7 @@ class GrokBuildHarness(HeadlessCliHarness):
             raise HarnessStepError(
                 f"grok exited {returncode}: {(stderr or stdout).strip()[-800:]}",
             )
-        turn = parse_json_output(stdout)
+        turn = parse_json_output(stdout, stderr)
         extra_sid = turn.extras.get("session_id")
         if extra_sid:
             self._session_id = str(extra_sid)

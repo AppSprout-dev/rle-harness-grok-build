@@ -31,6 +31,7 @@ from websockets.exceptions import ConnectionClosed
 from rle_harness_grok_build.cost import (
     parse_cost_usd,
     parse_generation_ids,
+    parse_usage_tokens,
     provider_cost_extras,
 )
 from rle_harness_grok_build.options import GrokBuildOptions
@@ -198,6 +199,9 @@ def build_agent_serve_command(
 class _TurnAccumulator:
     text_parts: list[str] = field(default_factory=list)
     used_tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
     cost_usd: float | None = None
     usage: dict[str, Any] | None = None
     cost: Any = None
@@ -214,6 +218,13 @@ class _TurnAccumulator:
             self.cost = payload.get("cost")
         if "usage" in payload and isinstance(payload.get("usage"), dict):
             self.usage = dict(payload["usage"])
+        tokens = parse_usage_tokens(payload)
+        if tokens.any_tokens():
+            self.prompt_tokens = tokens.billable_prompt
+            self.completion_tokens = tokens.completion_tokens
+            self.reasoning_tokens = tokens.reasoning_tokens
+            if self.usage is None and tokens.raw:
+                self.usage = tokens.raw
         for gen_id in parse_generation_ids(payload):
             if gen_id not in self.generation_ids:
                 self.generation_ids.append(gen_id)
@@ -256,7 +267,9 @@ class _TurnAccumulator:
         )
         return TurnResult(
             text="".join(self.text_parts),
-            prompt_tokens=self.used_tokens,
+            prompt_tokens=self.prompt_tokens or self.used_tokens,
+            completion_tokens=self.completion_tokens,
+            reasoning_tokens=self.reasoning_tokens,
             extras=extras,
         )
 

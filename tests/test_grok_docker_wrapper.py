@@ -445,6 +445,8 @@ class TestGrokDockerShPersist:
         assert '[model."google/gemini-3.8-flash"]' in written
         assert 'base_url = "https://openrouter.ai/api/v1"' in written
         assert 'env_key = "OPENROUTER_API_KEY"' in written
+        assert "HTTP-Referer" in written
+        assert "rle-harness-grok-build" in written
         assert "sk-" not in written
 
     def test_entrypoint_xai_default_has_no_model_block(self, tmp_path: Path) -> None:
