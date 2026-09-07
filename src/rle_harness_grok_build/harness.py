@@ -75,6 +75,13 @@ from rle_harness_grok_build.cost import (
 )
 from rle_harness_grok_build.isolated_home import (
     AUTH_FILENAMES,
+    COMPAT_ENV_API_BACKEND,
+    COMPAT_ENV_API_KEY_ENV,
+    COMPAT_ENV_BASE_URL,
+    COMPAT_ENV_MODEL,
+    COMPAT_ENV_OPENAI,
+    COMPAT_ENV_PROVIDER,
+    CustomModel,
     check_mcp_list_output,
     effective_mcp_url,
     mcp_config_toml,
@@ -121,7 +128,7 @@ def _real_grok_home() -> Path:
 def _copy_auth_into(dest: Path) -> None:
     src = _real_grok_home()
     if not src.is_dir():
-        logger.warning("no %s --- headless auth may fail without XAI_API_KEY", src)
+        logger.warning("no %s --- headless auth may fail without an API key env var", src)
         return
     for name in _AUTH_FILENAMES:
         path = src / name
@@ -265,13 +272,21 @@ class GrokBuildHarness(HeadlessCliHarness):
         os.environ["GROK_HOME"] = str(self._grok_home)
         cfg_url = effective_mcp_url(mcp_url, self.opts.mcp_advertise_url)
         self._mcp_url = cfg_url
+        custom_model = self._custom_model()
         _copy_auth_into(self._grok_home)
-        (self._grok_home / "config.toml").write_text(mcp_config_toml(cfg_url), encoding="utf-8")
+        (self._grok_home / "config.toml").write_text(
+            mcp_config_toml(cfg_url, custom_model), encoding="utf-8",
+        )
         # Project-scoped copy too (cwd priority / defense in depth).
-        write_project_grok_config(Path(self._workdir), cfg_url)
+        write_project_grok_config(Path(self._workdir), cfg_url, custom_model)
         logger.info(
-            "isolated GROK_HOME=%s with RLE-only MCP at %s",
+            "isolated GROK_HOME=%s with RLE-only MCP at %s%s",
             self._grok_home, cfg_url,
+            (
+                f" and OpenAI-compat model {custom_model.model} @ {custom_model.base_url}"
+                if custom_model is not None
+                else ""
+            ),
         )
         if self.opts.acp_enabled and is_docker_wrapper_binary(binary):
             self._persist_container = new_container_name()
@@ -305,14 +320,31 @@ class GrokBuildHarness(HeadlessCliHarness):
             await self._stop_acp()
             await self._stop_persist_container()
             raise
-        if not os.environ.get(self.opts.api_key_env):
+        key_env = self.opts.effective_api_key_env
+        if not os.environ.get(key_env):
             logger.info(
                 "%s not set --- relying on Grok Build's cached login for headless auth",
-                self.opts.api_key_env,
+                key_env,
             )
 
     def render_prompt(self, brief: Any) -> str:
         return super().render_prompt(brief) + "\n\n" + TOOL_NAMING_NOTE
+
+    def _custom_model(self) -> CustomModel | None:
+        return self.opts.resolve_custom_model(self._agent_model())
+
+    def _apply_compat_env(self, env: dict[str, str]) -> None:
+        """Stamp OpenAI-compat knobs so Docker entrypoint can rewrite config.toml."""
+        spec = self._custom_model()
+        if spec is None:
+            return
+        env[COMPAT_ENV_OPENAI] = "true"
+        if self.opts.provider:
+            env[COMPAT_ENV_PROVIDER] = self.opts.provider
+        env[COMPAT_ENV_MODEL] = spec.model
+        env[COMPAT_ENV_BASE_URL] = spec.base_url
+        env[COMPAT_ENV_API_KEY_ENV] = spec.env_key
+        env[COMPAT_ENV_API_BACKEND] = spec.api_backend
 
     def _subprocess_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -322,6 +354,7 @@ class GrokBuildHarness(HeadlessCliHarness):
             env["GROK_HOME"] = str(self._grok_home)
         if self._mcp_url is not None:
             env["MCP_URL"] = self._mcp_url
+        self._apply_compat_env(env)
         return env
 
     def _prepare_exec(
@@ -382,7 +415,13 @@ class GrokBuildHarness(HeadlessCliHarness):
         )
 
     def _agent_model(self) -> str | None:
-        return self.opts.model or self.ctx.config.model
+        if self.opts.model:
+            return self.opts.model
+        ctx = getattr(self, "_ctx", None)
+        if ctx is None:
+            return None
+        model = getattr(ctx.config, "model", None)
+        return model if isinstance(model, str) else None
 
     async def _start_persist_container(self) -> None:
         assert self._binary is not None and self._workdir is not None

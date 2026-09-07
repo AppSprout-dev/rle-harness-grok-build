@@ -55,6 +55,8 @@ class TestInvocationShaping:
         assert "[mcp_servers.rle]" in toml and 'url = "http://127.0.0.1:7000/mcp"' in toml
         assert "[compat.claude]" in toml and "mcps = false" in toml
         assert "[compat.cursor]" in toml
+        assert "[model." not in toml
+        assert "openrouter" not in toml
 
     def test_build_command_first_tick(self) -> None:
         cmd = build_command(
@@ -202,8 +204,51 @@ class TestAgainstFakeBinary:
                 assert DEFAULT_ADVERTISED_MCP_URL in home_cfg
                 assert "127.0.0.1:54321" not in home_cfg
                 assert DEFAULT_ADVERTISED_MCP_URL in proj_cfg
+                assert "[model." not in home_cfg
+                assert "openrouter" not in home_cfg
                 env = harness._subprocess_env()
                 assert env["MCP_URL"] == DEFAULT_ADVERTISED_MCP_URL
+                assert "GROK_BASE_URL" not in env
+                assert "OPENAI_COMPAT" not in env
+            finally:
+                await harness.stop_agent()
+
+    async def test_openai_compat_writes_openrouter_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("XAI_API_KEY", raising=False)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-not-a-real-key")
+        fake = _fake_grok(tmp_path)
+        harness = GrokBuildHarness(GrokBuildOptions(
+            binary=str(fake),
+            model="google/gemini-3.8-flash",
+            openai_compat=True,
+            api_key_env="OPENROUTER_API_KEY",
+        ))
+        mock = MockRimAPI()
+        async with RimAPIClient("http://mock") as client:
+            mock.attach(client)
+            harness._ctx = HarnessContext(config=RLEConfig(tick_interval=0.0), client=client)
+            await harness.start_agent("http://127.0.0.1:1/mcp")
+            try:
+                assert harness._grok_home is not None and harness._workdir is not None
+                home_cfg = (harness._grok_home / "config.toml").read_text(encoding="utf-8")
+                proj_cfg = (Path(harness._workdir) / ".grok" / "config.toml").read_text(
+                    encoding="utf-8",
+                )
+                for cfg in (home_cfg, proj_cfg):
+                    assert "[mcp_servers.rle]" in cfg
+                    assert "[compat.claude]" in cfg and "mcps = false" in cfg
+                    assert '[model."google/gemini-3.8-flash"]' in cfg
+                    assert 'base_url = "https://openrouter.ai/api/v1"' in cfg
+                    assert 'env_key = "OPENROUTER_API_KEY"' in cfg
+                    assert "sk-or-test-not-a-real-key" not in cfg
+                env = harness._subprocess_env()
+                assert env["GROK_MODEL"] == "google/gemini-3.8-flash"
+                assert env["GROK_BASE_URL"] == "https://openrouter.ai/api/v1"
+                assert env["GROK_API_KEY_ENV"] == "OPENROUTER_API_KEY"
+                assert env["OPENAI_COMPAT"] == "true"
+                assert "XAI_API_KEY" not in env
             finally:
                 await harness.stop_agent()
 

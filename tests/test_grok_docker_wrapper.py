@@ -45,6 +45,13 @@ def _run_wrapper(
     # Never forward real secrets into the fake docker argv dump.
     for key in (
         "XAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OPENAI_COMPAT",
+        "GROK_PROVIDER",
+        "GROK_MODEL",
+        "GROK_BASE_URL",
+        "GROK_API_KEY_ENV",
+        "GROK_API_BACKEND",
         "GROK_HOME",
         "GROK_AUTH_JSON",
         "GROK_DOCKER_HOME_VOLUME",
@@ -371,6 +378,106 @@ class TestGrokDockerShPersist:
         assert "--no-plan" not in lines
         assert "--output-format" not in lines
         assert "--resume" not in lines
+
+    def test_forwards_openrouter_without_xai(self, tmp_path: Path) -> None:
+        proc = _run_wrapper(
+            tmp_path,
+            ["mcp", "list"],
+            {
+                "OPENROUTER_API_KEY": "sk-or-test-not-a-real-key",
+                "OPENAI_COMPAT": "true",
+                "GROK_MODEL": "google/gemini-3.8-flash",
+                "GROK_BASE_URL": "https://openrouter.ai/api/v1",
+                "GROK_API_KEY_ENV": "OPENROUTER_API_KEY",
+            },
+        )
+        assert proc.returncode == 0, proc.stderr
+        text = proc.stdout
+        assert "OPENROUTER_API_KEY=sk-or-test-not-a-real-key" in text
+        assert "OPENAI_COMPAT=true" in text
+        assert "GROK_MODEL=google/gemini-3.8-flash" in text
+        assert "GROK_BASE_URL=https://openrouter.ai/api/v1" in text
+        assert "GROK_API_KEY_ENV=OPENROUTER_API_KEY" in text
+        assert "XAI_API_KEY=" not in text
+
+    def test_entrypoint_writes_openrouter_model(self) -> None:
+        text = (Path(__file__).resolve().parents[1] / "docker" / "entrypoint.sh").read_text(
+            encoding="utf-8",
+        )
+        assert "GROK_MODEL" in text
+        assert "GROK_BASE_URL" in text
+        assert "OPENROUTER_API_KEY" in text
+        assert "openrouter.ai/api/v1" in text
+        assert "[model." in text
+        assert "env_key" in text
+        assert "api_backend" in text
+
+    def test_entrypoint_generates_openrouter_config(self, tmp_path: Path) -> None:
+        entry = Path(__file__).resolve().parents[1] / "docker" / "entrypoint.sh"
+        home = tmp_path / "grok-home"
+        home.mkdir()
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        grok = bin_dir / "grok"
+        grok.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        grok.chmod(grok.stat().st_mode | stat.S_IEXEC)
+        env = os.environ.copy()
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["GROK_HOME"] = str(home)
+        env["HOME"] = str(tmp_path)
+        env["MCP_URL"] = "http://host.docker.internal:8766/mcp"
+        env["OPENAI_COMPAT"] = "true"
+        env["GROK_MODEL"] = "google/gemini-3.8-flash"
+        env["GROK_API_KEY_ENV"] = "OPENROUTER_API_KEY"
+        env.pop("GROK_BASE_URL", None)
+        env.pop("XAI_API_KEY", None)
+        proc = subprocess.run(
+            ["bash", str(entry), "mcp", "list"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        written = (home / "config.toml").read_text(encoding="utf-8")
+        assert "[mcp_servers.rle]" in written
+        assert "[compat.claude]" in written and "mcps = false" in written
+        assert '[model."google/gemini-3.8-flash"]' in written
+        assert 'base_url = "https://openrouter.ai/api/v1"' in written
+        assert 'env_key = "OPENROUTER_API_KEY"' in written
+        assert "sk-" not in written
+
+    def test_entrypoint_xai_default_has_no_model_block(self, tmp_path: Path) -> None:
+        entry = Path(__file__).resolve().parents[1] / "docker" / "entrypoint.sh"
+        home = tmp_path / "grok-home"
+        home.mkdir()
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        grok = bin_dir / "grok"
+        grok.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        grok.chmod(grok.stat().st_mode | stat.S_IEXEC)
+        env = os.environ.copy()
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["GROK_HOME"] = str(home)
+        env["HOME"] = str(tmp_path)
+        env["MCP_URL"] = "http://host.docker.internal:8766/mcp"
+        for key in (
+            "OPENAI_COMPAT", "GROK_PROVIDER", "GROK_MODEL",
+            "GROK_BASE_URL", "GROK_API_KEY_ENV", "GROK_API_BACKEND",
+        ):
+            env.pop(key, None)
+        proc = subprocess.run(
+            ["bash", str(entry), "mcp", "list"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        written = (home / "config.toml").read_text(encoding="utf-8")
+        assert "[mcp_servers.rle]" in written
+        assert "[model." not in written
+        assert "openrouter" not in written
 
     def test_entrypoint_acp_serve(self) -> None:
         text = (Path(__file__).resolve().parents[1] / "docker" / "entrypoint.sh").read_text(

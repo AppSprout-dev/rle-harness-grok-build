@@ -123,14 +123,48 @@ function Write-SkipTempMount {
         "Session resume across --rm ticks needs a non-Temp volume (set GROK_DOCKER_HOME_VOLUME).")
 }
 
-$dockerArgs = @(
-    "--add-host=host.docker.internal:host-gateway",
-    "-e", "MCP_URL=$McpUrl",
-    "-e", "GROK_HOME=/home/grok/.grok"
-)
-if ($env:XAI_API_KEY) {
-    $dockerArgs += @("-e", "XAI_API_KEY=$($env:XAI_API_KEY)")
+function Add-CompatEnv {
+    param([System.Collections.Generic.List[string]]$Dest)
+    if ($env:XAI_API_KEY) {
+        [void]$Dest.Add("-e")
+        [void]$Dest.Add("XAI_API_KEY=$($env:XAI_API_KEY)")
+    }
+    if ($env:OPENROUTER_API_KEY) {
+        [void]$Dest.Add("-e")
+        [void]$Dest.Add("OPENROUTER_API_KEY=$($env:OPENROUTER_API_KEY)")
+    }
+    foreach ($var in @(
+            "OPENAI_COMPAT", "GROK_PROVIDER", "GROK_MODEL",
+            "GROK_BASE_URL", "GROK_API_KEY_ENV", "GROK_API_BACKEND"
+        )) {
+        $value = [Environment]::GetEnvironmentVariable($var)
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            [void]$Dest.Add("-e")
+            [void]$Dest.Add("${var}=${value}")
+        }
+    }
+    $keyEnv = $env:GROK_API_KEY_ENV
+    if (
+        -not [string]::IsNullOrWhiteSpace($keyEnv) -and
+        $keyEnv -ne "XAI_API_KEY" -and
+        $keyEnv -ne "OPENROUTER_API_KEY"
+    ) {
+        $keyVal = [Environment]::GetEnvironmentVariable($keyEnv)
+        if (-not [string]::IsNullOrWhiteSpace($keyVal)) {
+            [void]$Dest.Add("-e")
+            [void]$Dest.Add("${keyEnv}=${keyVal}")
+        }
+    }
 }
+
+$dockerArgsList = New-Object System.Collections.Generic.List[string]
+[void]$dockerArgsList.Add("--add-host=host.docker.internal:host-gateway")
+[void]$dockerArgsList.Add("-e")
+[void]$dockerArgsList.Add("MCP_URL=$McpUrl")
+[void]$dockerArgsList.Add("-e")
+[void]$dockerArgsList.Add("GROK_HOME=/home/grok/.grok")
+Add-CompatEnv -Dest $dockerArgsList
+$dockerArgs = @($dockerArgsList)
 if ($env:GROK_AUTH_JSON -and (Test-Path -LiteralPath $env:GROK_AUTH_JSON) -and ((Get-Item $env:GROK_AUTH_JSON).Length -gt 0)) {
     $dockerArgs += @("-v", "$($env:GROK_AUTH_JSON):/auth/auth.json:ro")
 }
@@ -181,6 +215,9 @@ function Write-GrokDockerTrace {
         elseif ($a -like "XAI_API_KEY=*") {
             [void]$redacted.Add("XAI_API_KEY=<redacted>")
         }
+        elseif ($a -like "OPENROUTER_API_KEY=*") {
+            [void]$redacted.Add("OPENROUTER_API_KEY=<redacted>")
+        }
         elseif ($a -like "GROK_AGENT_SECRET=*") {
             [void]$redacted.Add("GROK_AGENT_SECRET=<redacted>")
         }
@@ -211,15 +248,19 @@ if ($PersistAction -eq "exec") {
         Write-Error "RLE_GROK_PERSIST_ACTION=exec requires RLE_GROK_PERSIST_CONTAINER"
         exit 1
     }
-    $execArgs = @(
-        "exec",
-        "-e", "MCP_URL=$McpUrl",
-        "-e", "GROK_HOME=/home/grok/.grok"
-    )
-    if ($env:XAI_API_KEY) {
-        $execArgs += @("-e", "XAI_API_KEY=$($env:XAI_API_KEY)")
+    $execArgsList = New-Object System.Collections.Generic.List[string]
+    [void]$execArgsList.Add("exec")
+    [void]$execArgsList.Add("-e")
+    [void]$execArgsList.Add("MCP_URL=$McpUrl")
+    [void]$execArgsList.Add("-e")
+    [void]$execArgsList.Add("GROK_HOME=/home/grok/.grok")
+    Add-CompatEnv -Dest $execArgsList
+    [void]$execArgsList.Add($PersistContainer)
+    [void]$execArgsList.Add("/entrypoint.sh")
+    foreach ($a in $out) {
+        [void]$execArgsList.Add($a)
     }
-    $execArgs += @($PersistContainer, "/entrypoint.sh") + @($out)
+    $execArgs = @($execArgsList)
     Write-GrokDockerTrace -Args $execArgs
     & docker @execArgs
     exit $LASTEXITCODE

@@ -5,6 +5,14 @@ from __future__ import annotations
 from pydantic import Field
 from rle.harness.cli_base import HeadlessCliOptions
 
+from rle_harness_grok_build.isolated_home import (
+    DEFAULT_API_BACKEND,
+    DEFAULT_OPENROUTER_API_KEY_ENV,
+    DEFAULT_OPENROUTER_BASE_URL,
+    DEFAULT_XAI_API_KEY_ENV,
+    CustomModel,
+)
+
 
 class GrokBuildOptions(HeadlessCliOptions):
     binary: str = Field(default="grok", description="Grok Build executable (name or path).")
@@ -33,8 +41,34 @@ class GrokBuildOptions(HeadlessCliOptions):
         ),
     )
     api_key_env: str = Field(
-        default="XAI_API_KEY",
-        description="Env var holding the xAI API key for headless auth (or use cached login).",
+        default=DEFAULT_XAI_API_KEY_ENV,
+        description=(
+            "Env var holding the API key for headless auth (never written into "
+            "config.toml). Default XAI_API_KEY; OpenRouter mode defaults to "
+            "OPENROUTER_API_KEY unless this opt is set explicitly."
+        ),
+    )
+    openai_compat: bool = Field(
+        default=False,
+        description=(
+            "Write an OpenAI-compatible [model.<id>] block into isolated "
+            "config.toml (base_url + env_key). Alias: provider=openrouter."
+        ),
+    )
+    provider: str | None = Field(
+        default=None,
+        description=(
+            "Inference provider. provider=openrouter enables OpenAI-compat "
+            "with https://openrouter.ai/api/v1 and OPENROUTER_API_KEY."
+        ),
+    )
+    base_url: str | None = Field(
+        default=None,
+        description=(
+            "OpenAI-compatible inference endpoint written as [model.<id>] "
+            "base_url. Defaults to https://openrouter.ai/api/v1 when "
+            "openai_compat=true or provider=openrouter."
+        ),
     )
     extra_args: list[str] = Field(
         default_factory=list,
@@ -105,3 +139,41 @@ class GrokBuildOptions(HeadlessCliOptions):
             return True
         mode = (self.mode or "").strip().lower()
         return mode == "acp"
+
+    @property
+    def openai_compat_enabled(self) -> bool:
+        if self.openai_compat:
+            return True
+        return (self.provider or "").strip().lower() == "openrouter"
+
+    @property
+    def effective_base_url(self) -> str | None:
+        if self.base_url:
+            return self.base_url.rstrip("/")
+        if self.openai_compat_enabled:
+            return DEFAULT_OPENROUTER_BASE_URL
+        return None
+
+    @property
+    def effective_api_key_env(self) -> str:
+        if "api_key_env" in self.model_fields_set:
+            return self.api_key_env
+        if self.openai_compat_enabled:
+            return DEFAULT_OPENROUTER_API_KEY_ENV
+        return self.api_key_env
+
+    def resolve_custom_model(self, model: str | None) -> CustomModel | None:
+        """OpenAI-compat ``[model.<id>]`` spec, or None when opts are off."""
+        if not self.openai_compat_enabled and not self.base_url:
+            return None
+        if not model:
+            return None
+        base_url = self.effective_base_url
+        if not base_url:
+            return None
+        return CustomModel(
+            model=model,
+            base_url=base_url,
+            env_key=self.effective_api_key_env,
+            api_backend=DEFAULT_API_BACKEND,
+        )

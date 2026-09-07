@@ -4,7 +4,8 @@
 # Grok dials RLE's advertised MCP URL (sibling RLE PR: McpHost binds
 # 0.0.0.0:8766 → http://host.docker.internal:8766/mcp).
 #
-#   export XAI_API_KEY=xai-...
+#   export XAI_API_KEY=xai-...          # xAI (default)
+#   export OPENROUTER_API_KEY=sk-or-... # OpenRouter; no XAI_API_KEY needed
 #   docker compose -f docker/docker-compose.yml build
 #   docker compose -f docker/docker-compose.yml run --rm grok mcp list
 #
@@ -19,8 +20,15 @@ services:
     image: rle-grok-build:local
     environment:
       XAI_API_KEY: ${XAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       MCP_URL: ${MCP_URL:-http://host.docker.internal:8766/mcp}
       GROK_HOME: /home/grok/.grok
+      OPENAI_COMPAT: ${OPENAI_COMPAT:-}
+      GROK_PROVIDER: ${GROK_PROVIDER:-}
+      GROK_MODEL: ${GROK_MODEL:-}
+      GROK_BASE_URL: ${GROK_BASE_URL:-}
+      GROK_API_KEY_ENV: ${GROK_API_KEY_ENV:-}
+      GROK_API_BACKEND: ${GROK_API_BACKEND:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     # Optional auth.json *file* only:
