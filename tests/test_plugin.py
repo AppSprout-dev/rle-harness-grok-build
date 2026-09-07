@@ -242,6 +242,8 @@ class TestAgainstFakeBinary:
                     assert '[model."google/gemini-3.8-flash"]' in cfg
                     assert 'base_url = "https://openrouter.ai/api/v1"' in cfg
                     assert 'env_key = "OPENROUTER_API_KEY"' in cfg
+                    assert "HTTP-Referer" in cfg
+                    assert "rle-harness-grok-build" in cfg
                     assert "sk-or-test-not-a-real-key" not in cfg
                 env = harness._subprocess_env()
                 assert env["GROK_MODEL"] == "google/gemini-3.8-flash"

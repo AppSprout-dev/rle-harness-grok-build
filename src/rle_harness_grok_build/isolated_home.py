@@ -34,6 +34,9 @@ DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 DEFAULT_XAI_API_KEY_ENV = "XAI_API_KEY"
 DEFAULT_API_BACKEND = "chat_completions"
+# So OpenRouter Activity / Analytics can filter this harness (not a secret).
+OPENROUTER_HTTP_REFERER = "https://github.com/AppSprout-dev/rle-harness-grok-build"
+OPENROUTER_X_TITLE = "rle-harness-grok-build"
 
 # Docker entrypoint / wrappers read these; never the secret itself.
 COMPAT_ENV_OPENAI = "OPENAI_COMPAT"
@@ -103,6 +106,10 @@ class CustomModel:
             f"base_url = {_toml_basic_string(self.base_url)}\n"
             f"env_key = {_toml_basic_string(self.env_key)}\n"
             f"api_backend = {_toml_basic_string(self.api_backend)}\n"
+            "extra_headers = { "
+            f'"HTTP-Referer" = {_toml_basic_string(OPENROUTER_HTTP_REFERER)}, '
+            f'"X-Title" = {_toml_basic_string(OPENROUTER_X_TITLE)}'
+            " }\n"
         )
 
 

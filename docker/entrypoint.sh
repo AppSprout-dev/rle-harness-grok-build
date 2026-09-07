@@ -67,6 +67,9 @@ EOF
       printf 'base_url = %s\n' "$(toml_basic_string "$compat_base_url")"
       printf 'env_key = %s\n' "$(toml_basic_string "$compat_env_key")"
       printf 'api_backend = %s\n' "$(toml_basic_string "$compat_backend")"
+      printf 'extra_headers = { "HTTP-Referer" = %s, "X-Title" = %s }\n' \
+        "$(toml_basic_string "https://github.com/AppSprout-dev/rle-harness-grok-build")" \
+        "$(toml_basic_string "rle-harness-grok-build")"
     } >> "$dest"
   fi
 }

@@ -1,0 +1,11 @@
+{
+  "data": {
+    "id": "gen-lookup-1",
+    "model": "deepseek/deepseek-v4-flash-0731",
+    "tokens_prompt": 2200,
+    "tokens_completion": 310,
+    "native_tokens_reasoning": 55,
+    "total_cost": 0.0019,
+    "usage": 0.0019
+  }
+}
