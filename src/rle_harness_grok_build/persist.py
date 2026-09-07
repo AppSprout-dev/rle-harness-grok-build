@@ -46,7 +46,12 @@ def persist_start_args(
     acp: bool = False,
     agent_flags: Sequence[str] | None = None,
 ) -> list[str]:
-    """Wrapper argv so start can bind-mount ``--cwd`` then run persist/ACP serve."""
+    """Wrapper argv so start can bind-mount ``--cwd`` then run persist/ACP serve.
+
+    ``--cwd`` here is the docker wrapper mount hint only. It is not an
+    agent-serve flag; wrappers/entrypoint must not forward it to
+    ``grok agent``. Headless ``-p`` flags in *agent_flags* are stripped.
+    """
     cmd = [binary, "--cwd", workdir]
     if acp:
         cmd.extend(without_agent_serve_unsupported_flags(agent_flags or ()))

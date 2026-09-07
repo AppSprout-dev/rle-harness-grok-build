@@ -6,6 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from rle_harness_grok_build.acp import (
+    AGENT_SERVE_UNSUPPORTED_FLAGS,
+    build_agent_serve_command,
+)
 from rle_harness_grok_build.argv_json import (
     ARGV_JSON_ENV,
     is_docker_wrapper_binary,
@@ -13,6 +17,7 @@ from rle_harness_grok_build.argv_json import (
     prepare_docker_wrapper_invocation,
     write_argv_json,
 )
+from rle_harness_grok_build.options import GrokBuildOptions
 
 
 class TestIsDockerWrapperBinary:
@@ -87,3 +92,25 @@ class TestPrepareDockerWrapperInvocation:
         assert invoke == [binary]
         assert sidecar == dest
         assert load_argv_json(dest) == ["mcp", "list"]
+
+    def test_acp_serve_sidecar_omits_p_only_flags(self, tmp_path: Path) -> None:
+        dest = tmp_path / "sidecar.json"
+        env: dict[str, str] = {}
+        cmd = build_agent_serve_command(
+            "grok-docker.sh",
+            bind="127.0.0.1:2419",
+            secret="tok",
+            cwd="/tmp/w",
+            model="grok-4.6",
+            opts=GrokBuildOptions(
+                extra_args=["--cwd", "/evil", "--yolo", "--foo", "--max-turns", "3"],
+            ),
+        )
+        invoke, sidecar = prepare_docker_wrapper_invocation(cmd, env, dest=dest)
+        assert invoke == ["grok-docker.sh"]
+        loaded = load_argv_json(dest)
+        assert sidecar == dest
+        assert loaded[0:3] == ["agent", "--always-approve", "-m"]
+        assert "--foo" in loaded
+        assert AGENT_SERVE_UNSUPPORTED_FLAGS.isdisjoint(loaded)
+        assert "/evil" not in loaded

@@ -48,7 +48,18 @@ class TestPersistHelpers:
             "/bin/grok-docker.sh",
             "/tmp/w",
             acp=True,
-            agent_flags=["--no-subagents", "-m", "grok-4.6", "--no-plan"],
+            agent_flags=[
+                "--cwd", "/evil",
+                "--max-turns", "9",
+                "--disallowed-tools", "x",
+                "--yolo",
+                "--no-subagents",
+                "-m",
+                "grok-4.6",
+                "--no-plan",
+                "--output-format", "json",
+                "--resume", "sid",
+            ],
         ) == [
             "/bin/grok-docker.sh", "--cwd", "/tmp/w", "-m", "grok-4.6", ACP_SERVE_ARG,
         ]

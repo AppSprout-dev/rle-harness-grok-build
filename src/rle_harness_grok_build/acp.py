@@ -93,31 +93,76 @@ def redact_ws_url(url: str) -> str:
     ))
 
 
-# Headless ``grok -p`` accepts these (14-headless-mode.md). Pinned
-# ``grok agent`` (1.0.13) does not: unexpected argument, exit 2.
-AGENT_SERVE_UNSUPPORTED_FLAGS = frozenset({"--no-subagents", "--no-plan"})
+# Headless ``grok -p`` / PagerArgs flags (14-headless-mode.md + this
+# harness's ``build_command``). Pinned ``grok agent`` (1.0.13) rejects
+# them: unexpected argument, exit 2, persist container dies.
+# Documented agent options (15-agent-mode.md AgentArgs) are ``-m/--model``
+# and ``--always-approve`` (plus reauth / profile / leader). ``--yolo`` is
+# a -p-era alias — serve argv uses ``--always-approve`` only.
+# ``--cwd`` is session/new + process cwd, not an agent-serve flag.
+_AGENT_SERVE_P_ONLY_SWITCHES = frozenset({
+    "--no-subagents",
+    "--no-plan",
+    "--yolo",
+    "-p",
+    "--single",
+    "--include-partial-messages",
+    "--fork-session",
+    "--continue",
+    "-c",
+    "--no-memory",
+    "--disable-web-search",
+})
+_AGENT_SERVE_P_ONLY_VALUE_FLAGS = frozenset({
+    "--cwd",
+    "--max-turns",
+    "--disallowed-tools",
+    "--output-format",
+    "--resume",
+    "-r",
+    "--reasoning-effort",
+    "--effort",
+    "--session-id",
+    "-s",
+    "--prompt-json",
+    "--prompt-file",
+    "--permission-mode",
+    "--tools",
+})
+AGENT_SERVE_UNSUPPORTED_FLAGS = (
+    _AGENT_SERVE_P_ONLY_SWITCHES | _AGENT_SERVE_P_ONLY_VALUE_FLAGS
+)
 
 
 def without_agent_serve_unsupported_flags(args: Sequence[str]) -> list[str]:
-    """Drop ``--no-subagents`` / ``--no-plan`` so they never reach ``grok agent``."""
-    return [arg for arg in args if arg not in AGENT_SERVE_UNSUPPORTED_FLAGS]
+    """Drop headless ``grok -p`` flags (and their values) from agent-serve argv."""
+    out: list[str] = []
+    skip_value = False
+    for arg in args:
+        if skip_value:
+            skip_value = False
+            continue
+        if arg in _AGENT_SERVE_P_ONLY_SWITCHES:
+            continue
+        name = arg.split("=", 1)[0]
+        if name in _AGENT_SERVE_P_ONLY_VALUE_FLAGS:
+            if "=" not in arg:
+                skip_value = True
+            continue
+        out.append(arg)
+    return out
 
 
 def agent_option_flags(opts: GrokBuildOptions, *, model: str | None) -> list[str]:
     """Flags that belong after ``agent`` and before ``serve`` / ``stdio``.
 
-    Strips headless-only ``--no-subagents`` / ``--no-plan`` even when they
-    arrive via ``extra_args`` (host ACP and docker ``acp-serve`` ``"$@"``).
+    Documented serve argv is ``grok agent --always-approve [-m MODEL] serve
+    …``. Harness ``max_turns`` / ``disallowed_tools`` / ``reasoning_effort``
+    and headless ``extra_args`` are ``grok -p`` only (1.0.13 rejects them).
     """
     flags: list[str] = []
     if model:
         flags += ["-m", model]
-    if opts.max_turns:
-        flags += ["--max-turns", str(opts.max_turns)]
-    if opts.reasoning_effort:
-        flags += ["--reasoning-effort", opts.reasoning_effort]
-    if opts.disallowed_tools:
-        flags += ["--disallowed-tools", ",".join(opts.disallowed_tools)]
     flags += list(opts.extra_args)
     return without_agent_serve_unsupported_flags(flags)
 
@@ -131,10 +176,14 @@ def build_agent_serve_command(
     model: str | None,
     opts: GrokBuildOptions,
 ) -> list[str]:
-    """``grok agent --always-approve [opts] serve --bind … --secret …``."""
+    """``grok agent --always-approve [-m MODEL] serve --bind … --secret …``.
+
+    *cwd* is accepted for callers but never forwarded: ACP ``session/new``
+    and the subprocess working directory own the project path. Headless
+    ``grok -p`` flags are stripped even when they arrive via ``extra_args``.
+    """
+    del cwd  # session/new + process cwd; not a ``grok agent serve`` flag.
     cmd = [binary, "agent", "--always-approve"]
-    if cwd:
-        cmd += ["--cwd", cwd]
     cmd += agent_option_flags(opts, model=model)
     cmd += ["serve", "--bind", bind, "--secret", secret]
     return without_agent_serve_unsupported_flags(cmd)

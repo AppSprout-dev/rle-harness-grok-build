@@ -80,15 +80,11 @@ class TestAcpHelpers:
             model="grok-4.6",
             opts=GrokBuildOptions(max_turns=20),
         )
-        assert cmd[:3] == ["/bin/grok", "agent", "--always-approve"]
-        assert cmd[cmd.index("--cwd") + 1] == "/tmp/w"
-        assert cmd[cmd.index("-m") + 1] == "grok-4.6"
-        assert cmd[cmd.index("--max-turns") + 1] == "20"
-        assert "--disallowed-tools" in cmd
-        assert "--no-subagents" not in cmd and "--no-plan" not in cmd
-        serve_at = cmd.index("serve")
-        assert cmd[serve_at:] == ["serve", "--bind", "127.0.0.1:2419", "--secret", "tok"]
-        assert serve_at > cmd.index("--always-approve")
+        assert cmd == [
+            "/bin/grok", "agent", "--always-approve", "-m", "grok-4.6",
+            "serve", "--bind", "127.0.0.1:2419", "--secret", "tok",
+        ]
+        assert AGENT_SERVE_UNSUPPORTED_FLAGS.isdisjoint(cmd)
 
     def test_host_acp_argv_strips_legacy_flags_from_extra_args(self) -> None:
         cmd = build_agent_serve_command(
@@ -97,12 +93,30 @@ class TestAcpHelpers:
             secret="tok",
             cwd="/tmp/w",
             model=None,
-            opts=GrokBuildOptions(extra_args=["--no-subagents", "--foo", "--no-plan"]),
+            opts=GrokBuildOptions(
+                max_turns=9,
+                reasoning_effort="high",
+                disallowed_tools=["run_terminal_cmd"],
+                extra_args=[
+                    "--cwd", "/evil",
+                    "--max-turns", "3",
+                    "--disallowed-tools", "web_search",
+                    "--yolo",
+                    "--no-subagents",
+                    "--foo",
+                    "--no-plan",
+                    "--output-format", "json",
+                    "--resume", "sid",
+                    "--reasoning-effort", "low",
+                    "--cwd=/also-evil",
+                ],
+            ),
         )
         assert cmd[:3] == ["/bin/grok", "agent", "--always-approve"]
         assert "--foo" in cmd
-        assert "--no-subagents" not in cmd and "--no-plan" not in cmd
         assert AGENT_SERVE_UNSUPPORTED_FLAGS.isdisjoint(cmd)
+        assert "/evil" not in cmd and "/tmp/w" not in cmd and "/also-evil" not in cmd
+        assert "json" not in cmd and "sid" not in cmd and "web_search" not in cmd
         assert cmd[cmd.index("serve"):] == [
             "serve", "--bind", "127.0.0.1:2419", "--secret", "tok",
         ]
@@ -111,17 +125,25 @@ class TestAcpHelpers:
         flags = agent_option_flags(
             GrokBuildOptions(
                 max_turns=6,
-                extra_args=["--no-subagents", "--foo", "--no-plan"],
+                reasoning_effort="high",
+                extra_args=["--no-subagents", "--foo", "--no-plan", "--yolo"],
             ),
             model="grok-4.6",
         )
-        assert flags[:2] == ["-m", "grok-4.6"]
-        assert "--foo" in flags
-        assert "--no-subagents" not in flags and "--no-plan" not in flags
-        assert persist_start_args("/bin/grok-docker.sh", "/tmp/w", acp=True, agent_flags=flags) == [
-            "/bin/grok-docker.sh", "--cwd", "/tmp/w", *flags, ACP_SERVE_ARG,
+        assert flags == ["-m", "grok-4.6", "--foo"]
+        start = persist_start_args(
+            "/bin/grok-docker.sh", "/tmp/w", acp=True, agent_flags=flags,
+        )
+        assert start == [
+            "/bin/grok-docker.sh", "--cwd", "/tmp/w", "-m", "grok-4.6", "--foo",
+            ACP_SERVE_ARG,
         ]
-        dirty = ["--no-subagents", "-m", "grok-4.6", "--no-plan"]
+        assert AGENT_SERVE_UNSUPPORTED_FLAGS.isdisjoint(start[3:])
+        dirty = [
+            "--cwd", "/evil", "--max-turns", "9", "--disallowed-tools", "x",
+            "--yolo", "--no-subagents", "-m", "grok-4.6", "--no-plan",
+            "--output-format", "json", "--resume", "sid",
+        ]
         assert persist_start_args(
             "/bin/grok-docker.sh", "/tmp/w", acp=True, agent_flags=dirty,
         ) == [
@@ -358,13 +380,10 @@ class TestAcpHarnessLifecycle:
         lines = [json.loads(line) for line in (tmp_path / "argv.json").read_text().splitlines()]
         assert lines[0] == ["mcp", "list"]
         serve = next(row for row in lines if "serve" in row)
-        assert serve[:2] == ["agent", "--always-approve"]
-        assert "--cwd" in serve
-        assert serve[serve.index("-m") + 1] == "grok-4.6"
+        assert serve[:4] == ["agent", "--always-approve", "-m", "grok-4.6"]
         assert serve[serve.index("--secret") + 1] == "host-secret"
         assert "--bind" in serve
-        assert "-p" not in serve
-        assert "--no-subagents" not in serve and "--no-plan" not in serve
+        assert AGENT_SERVE_UNSUPPORTED_FLAGS.isdisjoint(serve)
         assert harness._acp is None
         assert harness._serve_proc is None
 
@@ -376,15 +395,27 @@ class TestAcpHarnessLifecycle:
             binary=str(fake),
             acp=True,
             acp_secret="host-secret",
-            extra_args=["--no-subagents", "--foo", "--no-plan"],
+            max_turns=4,
+            reasoning_effort="high",
+            extra_args=[
+                "--cwd", "/evil",
+                "--max-turns", "3",
+                "--disallowed-tools", "web_search",
+                "--yolo",
+                "--no-subagents",
+                "--foo",
+                "--no-plan",
+                "--output-format", "json",
+                "--resume", "sid",
+            ],
         ))
         await _two_acp_turns(harness)
         lines = [json.loads(line) for line in (tmp_path / "argv.json").read_text().splitlines()]
         serve = next(row for row in lines if "serve" in row)
         assert serve[:2] == ["agent", "--always-approve"]
         assert "--foo" in serve
-        assert "--no-subagents" not in serve and "--no-plan" not in serve
         assert AGENT_SERVE_UNSUPPORTED_FLAGS.isdisjoint(serve)
+        assert "/evil" not in serve and "web_search" not in serve and "sid" not in serve
 
     async def test_mode_acp_alias(self, tmp_path: Path) -> None:
         fake = _fake_host_grok(tmp_path)
@@ -396,7 +427,20 @@ class TestAcpHarnessLifecycle:
     ) -> None:
         fake = _fake_acp_docker_wrapper(tmp_path)
         harness = GrokBuildHarness(GrokBuildOptions(
-            binary=str(fake), acp=True, model="grok-4.6", acp_secret="dock-secret",
+            binary=str(fake),
+            acp=True,
+            model="grok-4.6",
+            acp_secret="dock-secret",
+            extra_args=[
+                "--cwd", "/evil",
+                "--max-turns", "3",
+                "--disallowed-tools", "web_search",
+                "--yolo",
+                "--no-subagents",
+                "--no-plan",
+                "--output-format", "json",
+                "--resume", "sid",
+            ],
         ))
         await _two_acp_turns(harness)
         rows = [
@@ -416,7 +460,8 @@ class TestAcpHarnessLifecycle:
         assert start["json"][0] == "--cwd"
         assert start["json"][-1] == ACP_SERVE_ARG
         assert "-m" in start["json"]
-        assert "--no-subagents" not in start["json"] and "--no-plan" not in start["json"]
+        assert AGENT_SERVE_UNSUPPORTED_FLAGS.isdisjoint(start["json"][2:])
+        assert "/evil" not in start["json"]
         assert any(row["json"] == ["mcp", "list"] for row in rows)
         assert not any(row["json"] and row["json"][0] == "-p" for row in rows)
         assert harness._persist_container is None

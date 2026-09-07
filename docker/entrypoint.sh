@@ -55,6 +55,8 @@ fi
 
 # ACP serve: same isolated home, then documented grok agent serve.
 # Host publishes the port (RLE_GROK_ACP_PUBLISH) and talks JSON-RPC over /ws.
+# Never forward grok -p flags (--cwd, --max-turns, --disallowed-tools, …);
+# pinned grok 1.0.13 rejects them and the persist container exits.
 if [[ "${1:-}" == "acp-serve" ]]; then
   shift
   bind="${GROK_ACP_BIND:-0.0.0.0:2419}"
@@ -62,7 +64,28 @@ if [[ "${1:-}" == "acp-serve" ]]; then
     echo "acp-serve requires GROK_AGENT_SECRET" >&2
     exit 1
   fi
-  exec grok agent --always-approve "$@" \
+  agent_opts=()
+  skip_next=0
+  for a in "$@"; do
+    if ((skip_next)); then
+      skip_next=0
+      continue
+    fi
+    case "$a" in
+      --cwd|--max-turns|--disallowed-tools|--output-format|--resume|-r|--reasoning-effort|--effort|--session-id|-s|--prompt-json|--prompt-file|--permission-mode|--tools)
+        skip_next=1
+        continue
+        ;;
+      --cwd=*|--max-turns=*|--disallowed-tools=*|--output-format=*|--resume=*|-r=*|--reasoning-effort=*|--effort=*|--session-id=*|-s=*|--prompt-json=*|--prompt-file=*|--permission-mode=*|--tools=*)
+        continue
+        ;;
+      --no-subagents|--no-plan|--yolo|-p|--single|--include-partial-messages|--fork-session|--continue|-c|--no-memory|--disable-web-search)
+        continue
+        ;;
+    esac
+    agent_opts+=("$a")
+  done
+  exec grok agent --always-approve "${agent_opts[@]}" \
     serve --bind "$bind" --secret "$GROK_AGENT_SECRET"
 fi
 

@@ -54,7 +54,7 @@ Options (`--harness-opt key=value`):
 | `disallowed_tools` | shell/edit/web tools | Built-ins removed so the agent can only act via RLE tools |
 | `turn_timeout_s` | 180 | Kill the invocation after this many seconds |
 | `extra_instructions` | – | Appended to every turn prompt |
-| `extra_args` | – | Raw flags appended to every invocation. `--no-subagents` / `--no-plan` are stripped on `grok agent serve` |
+| `extra_args` | – | Raw flags appended to every `grok -p` invocation. Headless-only flags are stripped on `grok agent serve` (see [ACP vs `-p` flags](#acp-vs--p-flags)) |
 | `mcp_advertise_url` | – | URL written into grok config (Docker: `http://host.docker.internal:8766/mcp`) |
 | `mcp_container_reachable` | RLE config | Bind MCP on `0.0.0.0:8766` and advertise `host.docker.internal` |
 
@@ -271,12 +271,55 @@ python scripts/run_scenario.py crashlanded --harness grok-build --model grok-4.6
 
 Same knobs as warm: `binary`, `max_turns`, `disallowed_tools`, `XAI_API_KEY`,
 `mcp_advertise_url`, `mcp_container_reachable`, `GROK_DOCKER_HOME_VOLUME`.
+`max_turns` / `disallowed_tools` still apply to the `-p` path; ACP does not
+forward them on the serve command (session/`config.toml` own those concerns).
 
-Host `binary=grok` + `acp=true` does **not** need a temp wrapper. The harness
-never forwards `--no-subagents` / `--no-plan` to `grok agent … serve` (those
-are headless `grok -p` flags; pinned `grok agent` exits 2 if they appear),
-including when they show up in `extra_args`. Docker `acp-serve` was cleaned
-in #9; host argv is the same contract.
+### ACP vs `-p` flags
+
+Pinned Grok **1.0.13** `grok agent serve` is not `grok -p`. Headless flags
+make serve exit 2, so the persist container never stays up (`MCP healthcheck
+failed … container … is not running`). Bare `acp-serve` with no extra flags
+starts fine.
+
+**ACP / `grok agent … serve` argv** (host process, docker persist start,
+`RLE_GROK_ARGV_JSON`) is only:
+
+```bash
+grok agent --always-approve [-m MODEL] serve --bind <host:port> --secret <token>
+```
+
+`-m/--model` is a documented agent option (xai-org/grok-build
+`15-agent-mode.md` AgentArgs) and is kept. Project path is ACP `session/new`
+`cwd` (and the subprocess / `/work` mount), not `--cwd` on serve.
+
+**Never forwarded** onto serve (stripped from options and `extra_args`; no
+temp wrapper):
+
+| Flag | Why it is `-p` only |
+|---|---|
+| `--cwd` | Wrapper bind-mount hint / `session/new` cwd; 1.0.13 `grok agent` rejects it |
+| `--max-turns` | Headless turn cap (`build_command`) |
+| `--disallowed-tools` | Headless tool mask (`build_command`) |
+| `--yolo` | Headless alias; serve uses `--always-approve` |
+| `--no-subagents` / `--no-plan` | Headless `grok -p` only (#9 / #11) |
+| `--output-format` | Headless JSON envelope |
+| `--resume` / `-r` | Headless session resume; ACP keeps one `session/prompt` |
+| `--reasoning-effort` | Headless / session config; not added to serve |
+
+Also stripped if they appear in `extra_args`: `-p` / `--single`,
+`--session-id`, `--prompt-json`, `--prompt-file`, `--permission-mode`,
+`--tools`, `--continue` / `-c`, `--fork-session`,
+`--include-partial-messages`, `--no-memory`, `--disable-web-search`.
+
+Docker persist start still passes `--cwd <host>` to the **wrapper** so it
+can bind-mount `/work`. Wrappers and `entrypoint.sh acp-serve` drop that
+`--cwd` (and the other `-p` flags) before `exec grok agent`.
+
+**`-p` path is unchanged:** cold/warm ticks still send `--output-format json
+--yolo --cwd … --no-subagents --no-plan [--resume] [--max-turns]
+[--disallowed-tools] [extra_args]`.
+
+Host `binary=grok` + `acp=true` does **not** need a temp wrapper.
 
 ### How to measure TTFA (ACP vs warm vs cold)
 
@@ -298,7 +341,8 @@ Same seed/scoring/timeout; compare `acp=true` vs `warm=true` vs default:
 - Warm: `docker run -d --name rle-grok-…` once, then `docker exec … /entrypoint.sh grok -p …`
   each tick; `sessionId`, `usage` and `total_cost_usd` from the JSON object feed RLE's tracking.
 - ACP: one `grok agent serve` WebSocket; each tick is `session/prompt` until `stopReason`.
-  Host and docker argv omit `--no-subagents` / `--no-plan` (no temp wrapper).
+  Serve argv is `grok agent --always-approve [-m MODEL] serve --bind … --secret …`
+  (no temp wrapper; `-p`-only flags are never forwarded — see [ACP vs `-p` flags](#acp-vs--p-flags)).
 - `--smoke-test` needs no Grok Build: a scripted agent plays the same MCP round trip.
 
 ## Development

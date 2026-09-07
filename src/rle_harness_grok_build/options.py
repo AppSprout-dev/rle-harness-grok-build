@@ -39,9 +39,11 @@ class GrokBuildOptions(HeadlessCliOptions):
     extra_args: list[str] = Field(
         default_factory=list,
         description=(
-            "Additional raw flags appended to every invocation. "
-            "--no-subagents / --no-plan are stripped on grok agent serve "
-            "(host ACP and docker acp-serve); they remain on grok -p only."
+            "Additional raw flags appended to every grok -p invocation. "
+            "Headless-only flags (--cwd, --max-turns, --disallowed-tools, "
+            "--yolo, --no-subagents, --no-plan, --output-format, --resume, "
+            "--reasoning-effort, …) are stripped on grok agent serve "
+            "(host ACP, docker acp-serve, ARGV_JSON); they remain on grok -p."
         ),
     )
     mcp_advertise_url: str | None = Field(
